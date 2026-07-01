@@ -1,0 +1,16 @@
+{
+  "name": "@agentic-browser/daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "dotenv": "^16.6.1",
+    "puppeteer": "^24.10.2"
+  }
+}

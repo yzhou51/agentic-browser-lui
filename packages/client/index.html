@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agentic Browser Client Demo</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="panel setup">
+        <h1>Agentic Browser Client</h1>
+        <p id="status" class="status" data-state="idle">Idle. Not connected to daemon.</p>
+        <div class="grid">
+          <label>Client ID<input id="clientId" value="client-1" /></label>
+          <label>Daemon ID<input id="daemonId" value="daemon-1" /></label>
+          <label>Signaling URL<input id="signalingUrl" value="http://localhost:8095" /></label>
+          <label>Target URL<input id="targetUrl" value="https://example.com" /></label>
+        </div>
+        <div class="actions">
+          <button id="connectBtn">Connect</button>
+          <button id="launchChromeBtn">Launch Chrome</button>
+          <button id="openUrlBtn">Open URL</button>
+          <button id="disconnectBtn">Disconnect</button>
+        </div>
+      </section>
+
+      <section class="panel viewer">
+        <h2>Remote Screen</h2>
+        <video id="remoteVideo" autoplay playsinline muted tabindex="0"></video>
+        <textarea id="textCapture" class="text-capture" tabindex="-1" aria-label="Remote text capture" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+        <div class="actions">
+          <button id="closePageBtn">Close Page</button>
+          <button id="exitChromeBtn">Exit Chrome</button>
+        </div>
+      </section>
+
+      <section class="panel controls">
+        <h2>Input</h2>
+        <p>Click inside the viewer, then type to send remote text input.</p>
+        <label>Text input
+          <input id="textInput" placeholder="type and send to remote page" />
+        </label>
+        <button id="sendTextBtn">Send Text</button>
+        <pre id="logs"></pre>
+      </section>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/3.1.2/socket.io.js"></script>
+    <script src="/vendor/sc.websocket.js"></script>
+    <script src="/vendor/owt.js"></script>
+    <script type="module" src="/src/demo/main.js"></script>
+  </body>
+</html>

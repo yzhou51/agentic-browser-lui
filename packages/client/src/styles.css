@@ -1,0 +1,148 @@
+:root {
+  --bg: #0b1020;
+  --panel: #111936;
+  --ink: #e2e8f0;
+  --muted: #9aa4b2;
+  --focus: #22d3ee;
+  --accent: #f59e0b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.status {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #2d3d5f;
+  background: #0d1528;
+  color: #cbd5e1;
+}
+
+.status[data-state='connecting'] {
+  border-color: #8b5cf6;
+  color: #ddd6fe;
+}
+
+.status[data-state='connected'] {
+  border-color: #0f766e;
+  color: #99f6e4;
+}
+
+.status[data-state='active'] {
+  border-color: #f59e0b;
+  color: #fde68a;
+}
+
+.status[data-state='error'] {
+  border-color: #b91c1c;
+  color: #fecaca;
+}
+
+.status[data-state='idle'] {
+  border-color: #2d3d5f;
+  color: #cbd5e1;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  background:
+    radial-gradient(1200px 600px at 20% -10%, #163056 0%, transparent 65%),
+    radial-gradient(800px 400px at 90% 0%, #402220 0%, transparent 55%),
+    var(--bg);
+  font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 1.1fr 1.8fr 1fr;
+  gap: 16px;
+  padding: 18px;
+}
+
+.panel {
+  background: color-mix(in srgb, var(--panel) 92%, #000 8%);
+  border: 1px solid #27324f;
+  border-radius: 14px;
+  padding: 14px;
+}
+
+.grid {
+  display: grid;
+  gap: 10px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+}
+
+input {
+  background: #060b17;
+  border: 1px solid #22324d;
+  color: var(--ink);
+  border-radius: 9px;
+  padding: 10px;
+}
+
+button {
+  background: linear-gradient(180deg, #fcd34d, var(--accent));
+  border: 0;
+  color: #1f1400;
+  font-weight: 700;
+  border-radius: 10px;
+  padding: 9px 12px;
+  cursor: pointer;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+#remoteVideo {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  background: #02040a;
+  border-radius: 12px;
+  border: 1px solid #22324d;
+}
+
+#remoteVideo:focus {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.text-capture {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+  left: -9999px;
+  top: 0;
+}
+
+#logs {
+  white-space: pre-wrap;
+  background: #050913;
+  border: 1px solid #1e2b43;
+  border-radius: 8px;
+  min-height: 140px;
+  padding: 10px;
+}
+
+@media (max-width: 1024px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Target Demo Page</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: Segoe UI, Tahoma, Geneva, Verdana, sans-serif;
+        background: linear-gradient(135deg, #0f172a, #1e293b);
+        color: #e2e8f0;
+      }
+      .wrap {
+        max-width: 860px;
+        margin: 18px auto;
+        padding: 18px;
+      }
+      .card {
+        background: rgba(15, 23, 42, 0.86);
+        border: 1px solid #334155;
+        border-radius: 10px;
+        padding: 14px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      input, textarea, button {
+        width: 100%;
+        box-sizing: border-box;
+        margin-top: 8px;
+        padding: 10px;
+        border-radius: 8px;
+        border: 1px solid #475569;
+        background: #0b1220;
+        color: #e2e8f0;
+      }
+      button {
+        cursor: pointer;
+        background: linear-gradient(180deg, #22d3ee, #0891b2);
+        color: #041015;
+        font-weight: 600;
+      }
+      #clickLog {
+        min-height: 120px;
+        white-space: pre-wrap;
+        background: #020617;
+        border: 1px solid #1e293b;
+        border-radius: 8px;
+        padding: 10px;
+      }
+      #moveStatus {
+        margin: 10px 0 0;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid #334155;
+        background: #0b1220;
+        color: #93c5fd;
+      }
+      .hovered {
+        outline: 2px solid #22d3ee;
+        outline-offset: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h2>Embedded Target Demo</h2>
+      <div class="card">
+        <div class="grid">
+          <div>
+            <label for="nameInput">Name</label>
+            <input id="nameInput" placeholder="Type from remote" />
+          </div>
+          <div>
+            <label for="cityInput">City</label>
+            <input id="cityInput" placeholder="Type from remote" />
+          </div>
+        </div>
+
+        <label for="notesInput">Notes</label>
+        <textarea id="notesInput" rows="4" placeholder="Remote text input demo"></textarea>
+
+        <button id="actionBtn">Submit</button>
+
+        <div id="moveStatus">Move the mouse over the page.</div>
+
+        <h3>Click Log</h3>
+        <div id="clickLog">Waiting for clicks...</div>
+      </div>
+    </div>
+
+    <script>
+      const clickLog = document.getElementById('clickLog');
+      const moveStatus = document.getElementById('moveStatus');
+      let lastHovered = null;
+
+      function setHover(el) {
+        if (lastHovered && lastHovered !== el) {
+          lastHovered.classList.remove('hovered');
+        }
+        if (el && el !== document.body && el !== document.documentElement) {
+          el.classList.add('hovered');
+          lastHovered = el;
+        }
+      }
+
+      document.addEventListener('mousemove', (event) => {
+        const target = event.target;
+        setHover(target);
+        moveStatus.textContent = `mousemove over ${target.id || target.tagName} at (${event.clientX}, ${event.clientY})`;
+      });
+
+      document.addEventListener('click', (event) => {
+        const line = `clicked ${event.target.id || event.target.tagName} at (${event.clientX}, ${event.clientY})`;
+        clickLog.textContent += `\n${line}`;
+      });
+
+      document.getElementById('actionBtn').addEventListener('click', () => {
+        const name = document.getElementById('nameInput').value;
+        const city = document.getElementById('cityInput').value;
+        clickLog.textContent += `\nsubmit: name=${name}, city=${city}`;
+      });
+    </script>
+  </body>
+</html>

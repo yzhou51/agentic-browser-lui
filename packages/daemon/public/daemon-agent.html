@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Daemon Agent</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #111827;
+        --fg: #e5e7eb;
+        --accent: #22d3ee;
+        --muted: #94a3b8;
+      }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: radial-gradient(circle at top left, #1e293b, var(--bg) 50%);
+        color: var(--fg);
+      }
+      .container {
+        max-width: 980px;
+        margin: 24px auto;
+        padding: 16px;
+      }
+      .card {
+        background: color-mix(in srgb, var(--panel) 92%, black);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+      label {
+        display: block;
+        margin: 8px 0 4px;
+        color: var(--muted);
+      }
+      input, button {
+        font-size: 14px;
+      }
+      input {
+        width: 100%;
+        padding: 10px;
+        border-radius: 8px;
+        border: 1px solid #334155;
+        background: #020617;
+        color: var(--fg);
+      }
+      button {
+        margin-top: 10px;
+        margin-right: 8px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid #155e75;
+        background: linear-gradient(180deg, #22d3ee, #0891b2);
+        color: #001018;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      pre {
+        white-space: pre-wrap;
+        background: #020617;
+        border: 1px solid #1e293b;
+        border-radius: 8px;
+        padding: 12px;
+      }
+      .status { color: var(--accent); }
+      .target-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .target-row input {
+        flex: 1;
+      }
+      .target-frame {
+        margin-top: 10px;
+        width: 100%;
+        height: 560px;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        background: #0b1020;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Agentic Daemon Peer Agent</h1>
+      <div class="card">
+        <label for="uid">Daemon ID</label>
+        <input id="uid" value="daemon-1" />
+        <label for="remote">Client ID</label>
+        <input id="remote" value="client-1" />
+        <label for="host">Signaling Host</label>
+        <input id="host" value="http://localhost:8095" />
+        <div>
+          <button id="connect">Connect</button>
+          <button id="share">Share Screen</button>
+          <button id="disconnect">Disconnect</button>
+        </div>
+        <p class="status" id="status">Idle.</p>
+      </div>
+      <div class="card">
+        <h3>Target Page (Separate Tab)</h3>
+        <label for="targetUrl">Target URL</label>
+        <div class="target-row">
+          <input id="targetUrl" value="/target-demo.html" />
+          <button id="openTarget">Open Target Tab</button>
+          <button id="openTargetTab">Open In New Tab</button>
+        </div>
+        <iframe id="targetFrame" class="target-frame" title="Target Page" src="/target-demo.html"></iframe>
+      </div>
+      <div class="card">
+        <h3>Data Channel Messages</h3>
+        <pre id="messages"></pre>
+      </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/3.1.2/socket.io.js"></script>
+    <script src="./vendor/sc.websocket.js"></script>
+    <script src="./vendor/owt.js"></script>
+    <script type="module" src="./daemon-agent.js"></script>
+  </body>
+</html>
