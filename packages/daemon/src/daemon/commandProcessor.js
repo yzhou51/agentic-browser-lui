@@ -1,3 +1,7 @@
+import { createLogger } from '../logger.js';
+
+const logger = createLogger('command-processor');
+
 export class CommandProcessor {
   constructor(browserController) {
     this.browser = browserController;
@@ -10,7 +14,7 @@ export class CommandProcessor {
 
     const { type, payload = {} } = command;
 
-    console.log('[daemon] command received', {
+    logger.debug('[daemon] command received', {
       type,
       payload,
       requestId: command.requestId,
@@ -19,11 +23,27 @@ export class CommandProcessor {
     try {
       switch (type) {
         case 'launch_chrome':
+          this.browser.configureLaunch(payload || {});
           await this.browser.launchIfNeeded();
           return { ok: true, message: 'Chrome launched.' };
         case 'open_url':
           await this.browser.open(payload.url);
           return { ok: true, message: `Opened ${payload.url}` };
+        case 'open_target_page': {
+          const result = await this.browser.openTarget(payload.url);
+          return {
+            ok: true,
+            message: `Opened target page ${payload.url}`,
+            targetPage: result,
+            bridge: 'puppeteer',
+          };
+        }
+        case 'close_target_page': {
+          await this.browser.closeTargetPage();
+          return { ok: true, message: 'Target page closed.', bridge: 'puppeteer' };
+        }
+        case 'dispatch_target_command':
+          return await this.browser.dispatchTargetCommand(payload.command || {});
         case 'mouse_move':
           await this.browser.moveMouse(payload.x, payload.y);
           return { ok: true };
@@ -56,7 +76,7 @@ export class CommandProcessor {
           throw new Error(`Unsupported command type: ${type}`);
       }
     } catch (error) {
-      console.error('[daemon] command failed', {
+      logger.error('[daemon] command failed', {
         type,
         payload,
         requestId: command.requestId,

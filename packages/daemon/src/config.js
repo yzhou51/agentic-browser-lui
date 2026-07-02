@@ -14,4 +14,6 @@ export const config = {
   staticServerHost: process.env.DAEMON_STATIC_HOST || '0.0.0.0',
   staticServerPort: Number(process.env.DAEMON_STATIC_PORT || 8788),
   browserHeadless: (process.env.BROWSER_HEADLESS || 'false').toLowerCase() === 'true',
+  daemonLogLevel: process.env.DAEMON_LOG_LEVEL || process.env.LOG_LEVEL || 'info',
+  daemonLogFile: process.env.DAEMON_LOG_FILE || '/var/log/agent-browser-daemon.log',
 };

@@ -1,8 +1,0 @@
-[daemon-agent] handleCommand received {type: 'mouse_click', payload: {…}, requestId: 'cmd-1782957115455-149'}
-daemon-agent.js:703 [daemon-agent] command processed {requestId: 'cmd-1782957115455-149', type: 'mouse_click', body: {…}}
-daemon-agent.js:596 [daemon-agent] handleCommand received {type: 'mouse_move', payload: {…}, requestId: 'cmd-1782957116083-150'}
-daemon-agent.js:703 [daemon-agent] command processed {requestId: 'cmd-1782957116083-150', type: 'mouse_move', body: {…}}
-Extension status: check failed: Failed to read a named property 'href' from 'Location': Blocked a frame with origin "http://localhost:8080" from accessing a cross-origin frame.
-Extension status: extension-managed target active: 知乎 - 有问题，就会有答案 (https://www.zhihu.com/signin?next=%2F)
-
-

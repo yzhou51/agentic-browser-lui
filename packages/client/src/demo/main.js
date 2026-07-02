@@ -19,31 +19,32 @@ async function loadRuntimeConfig() {
 async function init() {
   const runtimeConfig = await loadRuntimeConfig();
   const client = new AgenticBrowserClient();
+  const actionChannel = typeof BroadcastChannel !== 'undefined'
+    ? new BroadcastChannel('agentic-browser-action')
+    : null;
   let activePointerId = null;
   let isMousePressed = false;
+  let connected = false;
+  let pendingAction = null;
+  let pendingActionConfirmedByDaemon = false;
 
   const el = {
     clientId: document.getElementById('clientId'),
-    daemonId: document.getElementById('daemonId'),
     signalingUrl: document.getElementById('signalingUrl'),
-    targetUrl: document.getElementById('targetUrl'),
     status: document.getElementById('status'),
     connectBtn: document.getElementById('connectBtn'),
-    launchChromeBtn: document.getElementById('launchChromeBtn'),
-    openUrlBtn: document.getElementById('openUrlBtn'),
     disconnectBtn: document.getElementById('disconnectBtn'),
+    resolveBtn: document.getElementById('resolveBtn'),
+    actionRequestMessage: document.getElementById('actionRequestMessage'),
     remoteVideo: document.getElementById('remoteVideo'),
     textCapture: document.getElementById('textCapture'),
-    closePageBtn: document.getElementById('closePageBtn'),
-    exitChromeBtn: document.getElementById('exitChromeBtn'),
     textInput: document.getElementById('textInput'),
     sendTextBtn: document.getElementById('sendTextBtn'),
     logs: document.getElementById('logs'),
   };
 
-  const envSignalingServer = runtimeConfig.signalingServer || window.location.origin || import.meta.env?.SIGNALING_SERVER;
+  const envSignalingServer = runtimeConfig.signalingServer || import.meta.env?.SIGNALING_SERVER || window.location.origin;
   const envClientId = runtimeConfig.clientId || import.meta.env?.CLIENT_ID;
-  const envDaemonId = runtimeConfig.daemonId || import.meta.env?.DAEMON_ID;
 
   if (envSignalingServer) {
     el.signalingUrl.value = envSignalingServer;
@@ -51,8 +52,13 @@ async function init() {
   if (envClientId) {
     el.clientId.value = envClientId;
   }
-  if (envDaemonId) {
-    el.daemonId.value = envDaemonId;
+
+  function getActiveDaemonId() {
+    const fromRequest = String(pendingAction?.daemonId || '').trim();
+    if (fromRequest) {
+      return fromRequest;
+    }
+    return '';
   }
 
   function log(message) {
@@ -66,6 +72,39 @@ async function init() {
   function setStatus(state, message) {
     el.status.dataset.state = state;
     el.status.textContent = message;
+  }
+
+  function updateActionRequestView() {
+    if (!pendingAction) {
+      el.actionRequestMessage.textContent = 'No pending action request.';
+      el.resolveBtn.disabled = true;
+      return;
+    }
+
+    const targetText = pendingAction.targetUrl ? ` target ${pendingAction.targetUrl}` : ' target page';
+    if (pendingActionConfirmedByDaemon) {
+      el.actionRequestMessage.textContent =
+        `Agent requests action for daemon "${pendingAction.daemonId || 'unknown'}" and${targetText}. ` +
+        'Connect, then click Resolve.';
+    } else {
+      el.actionRequestMessage.textContent =
+        `Take Action received for daemon "${pendingAction.daemonId || 'unknown'}" and${targetText}. ` +
+        'Waiting for daemon action_request confirmation...';
+    }
+    el.resolveBtn.disabled = !(connected && pendingActionConfirmedByDaemon);
+  }
+
+  function setPendingAction(action, options = {}) {
+    pendingAction = action;
+    pendingActionConfirmedByDaemon = Boolean(options.confirmedByDaemon);
+    const requestedDaemonId = String(action?.daemonId || '').trim();
+    if (requestedDaemonId) {
+      client.setDaemonId(requestedDaemonId);
+    }
+    if (action?.signalingServer) {
+      el.signalingUrl.value = action.signalingServer;
+    }
+    updateActionRequestView();
   }
 
   async function sendTextInput(text) {
@@ -103,19 +142,54 @@ async function init() {
     if (stream?.mediaStream) {
       el.remoteVideo.srcObject = stream.mediaStream;
       el.remoteVideo.play().catch(() => { });
-      setStatus('active', `Connected to daemon ${el.daemonId.value} and receiving remote stream.`);
+      setStatus('active', 'Connected and receiving remote stream.');
       log('Remote stream attached.');
+    }
+  };
+
+  client.onDisconnect = () => {
+    connected = false;
+    updateActionRequestView();
+    setStatus('idle', 'Disconnected from signaling. Connect again before Resolve.');
+    log('Disconnected from signaling server.');
+  };
+
+  client.onReconnectAttempt = ({ daemonId, error }) => {
+    const targetDaemonId = String(daemonId || getActiveDaemonId() || 'unknown').trim() || 'unknown';
+    setStatus('connecting', `Stale signaling session detected for daemon "${targetDaemonId}". Reconnecting...`);
+    log(`Stale signaling session detected for daemon "${targetDaemonId}". Reconnecting...`);
+    if (error) {
+      log(`Reconnect trigger reason: ${error}`);
     }
   };
 
   client.onMessage = ({ origin, message }) => {
     try {
       const parsed = JSON.parse(message);
+      if (parsed.type === 'action_request') {
+        const actionPayload = parsed.payload && typeof parsed.payload === 'object' ? parsed.payload : {};
+        setPendingAction({
+          requestId: parsed.requestId || '',
+          daemonId: actionPayload.daemonId || origin,
+          clientId: actionPayload.clientId || el.clientId.value,
+          signalingServer: actionPayload.signalingServer || el.signalingUrl.value,
+          targetUrl: actionPayload.targetUrl || '',
+        }, { confirmedByDaemon: true });
+        setStatus('connected', `Action request received from daemon "${origin}". Connect and click Resolve.`);
+        log(`Action request received from "${origin}".`);
+        return;
+      }
+      if (parsed.type === 'resolve_result') {
+        const ok = parsed.ok !== false;
+        setStatus(ok ? 'active' : 'error', ok ? 'Resolve processed. Daemon is starting screen share.' : `Resolve failed: ${parsed.error || 'unknown error'}`);
+        log(`Resolve result: ${ok ? 'ok' : 'failed'} ${parsed.error ? `(${parsed.error})` : ''}`);
+        return;
+      }
       if (parsed.type === 'command_result') {
-        setStatus('active', `Connected to daemon ${origin}. Last command result received.`);
+        setStatus('active', `Connected to daemon "${origin}". Last command result received.`);
         console.log('[client] command_result received', parsed);
         log(
-          `Result ${parsed.requestId || 'n/a'} from ${origin}: ${parsed.ok ? 'ok' : 'failed'} ` +
+          `Result "${parsed.requestId || 'n/a'}" from "${origin}": ${parsed.ok ? 'ok' : 'failed'} ` +
           `${parsed.error ? `(${parsed.error})` : ''}`
         );
         if (parsed.result) {
@@ -126,67 +200,134 @@ async function init() {
     } catch {
       // Keep compatibility with plain text messages.
     }
-    setStatus('active', `Connected to daemon ${origin}. Message received.`);
-    log(`Message from ${origin}: ${message}`);
+    setStatus('active', `Connected to daemon "${origin}". Message received.`);
+    log(`Message from "${origin}": ${message}`);
   };
 
   el.connectBtn.addEventListener('click', async () => {
-    setStatus('connecting', `Connecting to daemon ${el.daemonId.value} via ${el.signalingUrl.value}...`);
+    const daemonId = getActiveDaemonId();
+    if (!daemonId) {
+      setStatus('error', 'No daemon id available yet. Wait for Take Action request from Agent page.');
+      log('Connect blocked: daemon id is missing.');
+      return;
+    }
+
+    setStatus('connecting', `Connecting to daemon "${daemonId}" via "${el.signalingUrl.value}"...`);
+    log(`Connecting to signaling server "${el.signalingUrl.value}" for daemon "${daemonId}".`);
     try {
       await client.connect({
         signalingHost: el.signalingUrl.value,
         clientId: el.clientId.value,
-        daemonId: el.daemonId.value,
+        daemonId,
+        forceReconnect: true,
       });
-      setStatus('connected', `Connected to signaling. Waiting for daemon ${el.daemonId.value} activity.`);
+      connected = true;
+      updateActionRequestView();
+      if (pendingActionConfirmedByDaemon) {
+        setStatus('connected', `Connected to signaling for daemon "${daemonId}". Click Resolve to start screen share.`);
+      } else {
+        setStatus('connected', `Connected to signaling for daemon "${daemonId}". Waiting for daemon action_request confirmation.`);
+      }
       log('Connected to signaling and daemon peer endpoint.');
     } catch (error) {
       setStatus('error', `Connect failed: ${error.message}`);
+      console.error('[client] connect failed', {
+        daemonId,
+        signalingUrl: el.signalingUrl.value,
+        clientId: el.clientId.value,
+        error,
+      });
       log(`Connect failed: ${error.message}`);
-    }
-  });
-
-  el.launchChromeBtn.addEventListener('click', async () => {
-    try {
-      const requestId = await client.sendCommand('launch_chrome');
-      log(`launch_chrome sent (${requestId}).`);
-    } catch (error) {
-      log(`launch_chrome failed: ${error.message}`);
-    }
-  });
-
-  el.openUrlBtn.addEventListener('click', async () => {
-    try {
-      const requestId = await client.sendCommand('open_url', { url: el.targetUrl.value });
-      log(`open_url sent (${requestId}): ${el.targetUrl.value}`);
-    } catch (error) {
-      log(`open_url failed: ${error.message}`);
     }
   });
 
   el.disconnectBtn.addEventListener('click', async () => {
     await client.disconnect();
+    connected = false;
+    updateActionRequestView();
     setStatus('idle', 'Disconnected. Not connected to daemon.');
     log('Disconnected.');
   });
 
-  el.closePageBtn.addEventListener('click', async () => {
+  el.resolveBtn.addEventListener('click', async () => {
+    if (!pendingAction) {
+      setStatus('error', 'No pending action request to resolve.');
+      return;
+    }
+
+    const daemonId = getActiveDaemonId();
+    if (!daemonId) {
+      setStatus('error', 'Resolve failed: daemon id is missing.');
+      return;
+    }
+
+    if (!connected) {
+      setStatus('error', `Resolve failed: not connected to daemon "${daemonId}".`);
+      return;
+    }
+
     try {
-      const requestId = await client.sendCommand('close_page');
-      log(`close_page sent (${requestId}).`);
+      if (!pendingActionConfirmedByDaemon) {
+        setStatus('connecting', `Connected but daemon confirmation is pending. Sending Resolve fallback to daemon "${daemonId}"...`);
+        log('Resolve fallback: action_request confirmation has not arrived; sending resolve directly after short grace delay.');
+        await new Promise((resolve) => {
+          window.setTimeout(resolve, 1200);
+        });
+      }
+
+      client.setDaemonId(daemonId);
+      const resolveMessage = {
+        type: 'resolve',
+        requestId: `resolve-${Date.now()}`,
+        payload: {
+          actionRequestId: pendingAction.requestId || '',
+          clientId: el.clientId.value,
+        },
+      };
+
+      log(`Resolve clicked. Sending message to daemon "${daemonId}": ${JSON.stringify(resolveMessage)}`);
+      console.log('[client] resolve clicked', {
+        daemonId,
+        resolveMessage,
+      });
+
+      await client.sendMessage({
+        type: resolveMessage.type,
+        requestId: resolveMessage.requestId,
+        payload: resolveMessage.payload,
+      });
+      setStatus('connecting', `Resolve sent to daemon "${daemonId}". Waiting for stream...`);
+      log(`Resolve sent to daemon "${daemonId}".`);
+
+      window.setTimeout(() => {
+        log('Resolve waiting: no resolve_result yet. Check daemon log for incoming resolve message.');
+      }, 5000);
     } catch (error) {
-      log(`close_page failed: ${error.message}`);
+      setStatus('error', `Resolve failed: ${error.message}`);
+      log(`Resolve failed: ${error.message}`);
     }
   });
 
-  el.exitChromeBtn.addEventListener('click', async () => {
-    try {
-      const requestId = await client.sendCommand('exit_chrome');
-      log(`exit_chrome sent (${requestId}).`);
-    } catch (error) {
-      log(`exit_chrome failed: ${error.message}`);
-    }
-  });
+  if (actionChannel) {
+    actionChannel.onmessage = (event) => {
+      const data = event?.data;
+      if (!data || data.type !== 'take_action') {
+        return;
+      }
+
+      setPendingAction({
+        requestId: data.requestId || '',
+        daemonId: data.daemonId || '',
+        clientId: data.clientId || el.clientId.value,
+        signalingServer: data.signalingServer || el.signalingUrl.value,
+        targetUrl: data.targetUrl || '',
+      }, { confirmedByDaemon: false });
+      setStatus('connected', `Take Action request received for daemon "${data.daemonId || 'unknown'}". Waiting for daemon confirmation...`);
+      log(`Take Action request received from Agent page. daemonId="${data.daemonId || 'unknown'}"`);
+    };
+  }
+
+  updateActionRequestView();
 
   el.sendTextBtn.addEventListener('click', async () => {
     const text = el.textInput.value;
@@ -392,6 +533,7 @@ async function init() {
   el.remoteVideo.addEventListener('focus', () => {
     log('Remote viewer focused. Click the viewer to activate text capture.');
   });
+
 }
 
 init();

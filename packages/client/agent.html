@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agentic Browser Agent Controls</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="panel setup">
+        <h1>Agentic Browser Agent</h1>
+        <p id="status" class="status" data-state="idle">Idle. No daemon operation requested yet.</p>
+        <p class="subgroup-note">Need remote viewer and input capture? Open <a href="/index.html">Client page</a>.</p>
+
+        <div class="subgroup">
+          <h2>Session</h2>
+          <div class="grid">
+            <label>Client ID<input id="clientId" value="client-1" /></label>
+            <label>Daemon ID<input id="daemonId" value="daemon-1" /></label>
+            <label>Signaling URL<input id="signalingUrl" value="http://localhost:8095" /></label>
+            <label>Daemon Server<input id="daemonApiUrl" value="http://localhost:8788" /></label>
+          </div>
+        </div>
+
+        <div class="subgroup">
+          <h2>Daemon Actions</h2>
+          <div class="grid">
+            <label>Chrome Binary Path<input id="chromePath" value="" placeholder="optional, e.g. /usr/bin/google-chrome" /></label>
+            <label>Chrome Launch Params<input id="chromeParams" value='[{"name":"--proxy-server","value":""},{"name":"--bypass-proxy-list","value":"localhost,127.0.0.1"}]' /></label>
+            <label>Target URL<input id="targetUrl" value="https://example.com" /></label>
+          </div>
+          <div class="actions">
+            <button id="launchChromeBtn">Launch Chrome</button>
+            <button id="closeChromeBtn">Close Chrome</button>
+            <button id="openUrlBtn">Open Target Page</button>
+            <button id="takeActionBtn">Take Action</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel controls">
+        <h2>Agent Logs</h2>
+        <p>These logs show REST API requests from the agent page to daemon.</p>
+        <pre id="logs"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="/src/demo/agent.js"></script>
+  </body>
+</html>

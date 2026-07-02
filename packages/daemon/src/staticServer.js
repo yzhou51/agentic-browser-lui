@@ -63,7 +63,70 @@ function readJsonBody(req) {
   });
 }
 
-export function startStaticServer({ rootDir, browserModuleDir, host, port, daemonAgentConfig, submitCommand }) {
+function writeJson(res, statusCode, body, extraHeaders = {}) {
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    ...extraHeaders,
+  });
+  res.end(JSON.stringify(body));
+}
+
+function withCorsHeaders(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
+export function startStaticServer({
+  rootDir,
+  browserModuleDir,
+  host,
+  port,
+  getDaemonAgentConfig,
+  submitCommand,
+  getDaemonState,
+  enqueueAgentCommand,
+  getAgentCommandsAfter,
+  onAgentEvent,
+  isAgentOnline,
+  bootstrapAgentBridge,
+}) {
+  async function ensureAgentBridgeOnline() {
+    if (isAgentOnline()) {
+      return { ok: true, bootstrapped: false };
+    }
+
+    if (typeof bootstrapAgentBridge !== 'function') {
+      return {
+        ok: false,
+        error: 'daemon-agent page is offline and auto-bootstrap is not configured.',
+      };
+    }
+
+    try {
+      await bootstrapAgentBridge();
+    } catch (error) {
+      return {
+        ok: false,
+        error: `Failed to bootstrap daemon-agent page: ${error.message}`,
+      };
+    }
+
+    const timeoutAt = Date.now() + 12000;
+    while (Date.now() < timeoutAt) {
+      if (isAgentOnline()) {
+        return { ok: true, bootstrapped: true };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+
+    return {
+      ok: false,
+      error: 'daemon-agent bridge did not come online in time. Check daemon Chrome window and extension state.',
+    };
+  }
+
   const server = http.createServer((req, res) => {
     if (!req.url) {
       res.writeHead(400);
@@ -71,12 +134,15 @@ export function startStaticServer({ rootDir, browserModuleDir, host, port, daemo
       return;
     }
 
+    if (req.method === 'OPTIONS' && req.url.startsWith('/api/v1/')) {
+      withCorsHeaders(res);
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
     if (req.url === '/daemon-agent.config.json') {
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-      });
-      res.end(JSON.stringify(daemonAgentConfig, null, 2));
+      writeJson(res, 200, getDaemonAgentConfig());
       return;
     }
 
@@ -93,18 +159,286 @@ export function startStaticServer({ rootDir, browserModuleDir, host, port, daemo
       readJsonBody(req)
         .then(async (payload) => {
           const result = await submitCommand(payload);
-          res.writeHead(200, {
-            'Content-Type': 'application/json; charset=utf-8',
-            'Cache-Control': 'no-store',
-          });
-          res.end(JSON.stringify(result));
+          writeJson(res, 200, result);
         })
         .catch((error) => {
-          res.writeHead(400, {
-            'Content-Type': 'application/json; charset=utf-8',
-            'Cache-Control': 'no-store',
+          writeJson(res, 400, { ok: false, error: error.message || 'Command failed.' });
+        });
+      return;
+    }
+
+    if (req.url === '/api/v1/status' && req.method === 'GET') {
+      withCorsHeaders(res);
+      writeJson(res, 200, {
+        ok: true,
+        daemon: getDaemonState(),
+      });
+      return;
+    }
+
+    if (req.url.startsWith('/api/v1/agent/ready') && req.method === 'GET') {
+      withCorsHeaders(res);
+      Promise.resolve()
+        .then(async () => {
+          const url = new URL(req.url, 'http://localhost');
+          const bootstrap = ['1', 'true', 'yes'].includes(
+            String(url.searchParams.get('bootstrap') || '').trim().toLowerCase()
+          );
+
+          if (!bootstrap) {
+            const online = isAgentOnline();
+            writeJson(res, 200, {
+              ok: true,
+              ready: online,
+              online,
+              bootstrapped: false,
+              message: online ? 'agent bridge is online' : 'agent bridge is offline',
+            });
+            return;
+          }
+
+          const bridge = await ensureAgentBridgeOnline();
+          writeJson(res, bridge.ok ? 200 : 409, {
+            ok: bridge.ok,
+            ready: bridge.ok,
+            online: bridge.ok,
+            bootstrapped: bridge.bootstrapped || false,
+            message: bridge.ok ? 'agent bridge is online' : bridge.error,
           });
-          res.end(JSON.stringify({ ok: false, error: error.message || 'Command failed.' }));
+        })
+        .catch((error) => {
+          writeJson(res, 400, { ok: false, error: error.message || 'Agent ready check failed.' });
+        });
+      return;
+    }
+
+    if (req.url.startsWith('/api/v1/agent/commands') && req.method === 'GET') {
+      withCorsHeaders(res);
+      const url = new URL(req.url, 'http://localhost');
+      const after = Number(url.searchParams.get('after') || 0);
+      const data = getAgentCommandsAfter(after);
+      writeJson(res, 200, {
+        ok: true,
+        ...data,
+      });
+      return;
+    }
+
+    if (req.url === '/api/v1/agent/events' && req.method === 'POST') {
+      withCorsHeaders(res);
+      readJsonBody(req)
+        .then((payload) => {
+          onAgentEvent(payload);
+          writeJson(res, 200, { ok: true });
+        })
+        .catch((error) => {
+          writeJson(res, 400, { ok: false, error: error.message || 'Invalid event payload.' });
+        });
+      return;
+    }
+
+    if (req.url === '/api/v1/chrome/launch' && req.method === 'POST') {
+      withCorsHeaders(res);
+      readJsonBody(req)
+        .then(async (payload) => {
+          const result = await submitCommand({ type: 'launch_chrome', payload });
+
+          writeJson(res, 200, {
+            ok: true,
+            result,
+            message: 'Chrome launched. daemon-agent page can be auto-bootstrapped by action/share APIs when needed.',
+          });
+        })
+        .catch((error) => {
+          writeJson(res, 400, { ok: false, error: error.message || 'Launch failed.' });
+        });
+      return;
+    }
+
+    if (req.url === '/api/v1/chrome/exit' && req.method === 'POST') {
+      withCorsHeaders(res);
+      submitCommand({ type: 'exit_chrome' })
+        .then((result) => {
+          writeJson(res, 200, { ok: true, result });
+        })
+        .catch((error) => {
+          writeJson(res, 400, { ok: false, error: error.message || 'Exit failed.' });
+        });
+      return;
+    }
+
+    if (req.url === '/api/v1/page/open' && req.method === 'POST') {
+      withCorsHeaders(res);
+      readJsonBody(req)
+        .then(async (payload) => {
+          const url = String(payload.url || '').trim();
+          if (!url) {
+            writeJson(res, 400, { ok: false, error: 'url is required.' });
+            return;
+          }
+
+          if (String(payload.name || '').trim() === 'agent-target') {
+            const agentConfig = typeof getDaemonAgentConfig === 'function' ? getDaemonAgentConfig() : {};
+            const openHost = host === '0.0.0.0' || host === '::' ? 'localhost' : host;
+            const daemonAgentUrl = `http://${openHost}:${port}/daemon-agent.html?uid=${encodeURIComponent(String(agentConfig?.daemonId || ''))}&remote=${encodeURIComponent(String(agentConfig?.clientId || ''))}&host=${encodeURIComponent(String(agentConfig?.signalingServer || ''))}`;
+
+            await submitCommand({
+              type: 'open_url',
+              payload: { url: daemonAgentUrl },
+            });
+          }
+
+          const result = await submitCommand({
+            type: 'open_target_page',
+            payload: {
+              name: payload.name || '',
+              url,
+            },
+          });
+          writeJson(res, 200, { ok: true, result });
+        })
+        .catch((error) => {
+          writeJson(res, 400, { ok: false, error: error.message || 'Open page failed.' });
+        });
+      return;
+    }
+
+    if (req.url === '/api/v1/page/close' && req.method === 'POST') {
+      withCorsHeaders(res);
+      submitCommand({ type: 'close_target_page', payload: {} })
+        .then((result) => {
+          writeJson(res, 200, { ok: true, result });
+        })
+        .catch((error) => {
+          writeJson(res, 400, { ok: false, error: error.message || 'Close page failed.' });
+        });
+      return;
+    }
+
+    if (req.url === '/api/v1/share/start' && req.method === 'POST') {
+      withCorsHeaders(res);
+      readJsonBody(req)
+        .then(async (payload) => {
+          const bridge = await ensureAgentBridgeOnline();
+          if (!bridge.ok) {
+            writeJson(res, 409, {
+              ok: false,
+              error: bridge.error,
+            });
+            return;
+          }
+
+          const daemonId = String(payload.daemonId || '').trim();
+          const clientId = String(payload.clientId || '').trim();
+          const signalingServer = String(payload.signalingServer || '').trim();
+
+          if (!daemonId || !clientId) {
+            writeJson(res, 400, { ok: false, error: 'daemonId and clientId are required.' });
+            return;
+          }
+
+          const setSession = enqueueAgentCommand('set_session', {
+            daemonId,
+            clientId,
+            signalingServer,
+          });
+          const connectAndShare = enqueueAgentCommand('connect_share', {
+            daemonId,
+            clientId,
+            signalingServer,
+            automated: true,
+          });
+
+          writeJson(res, 200, {
+            ok: true,
+            commandIds: [setSession.id, connectAndShare.id],
+            bootstrappedAgent: bridge.bootstrapped,
+          });
+        })
+        .catch((error) => {
+          writeJson(res, 400, { ok: false, error: error.message || 'Share start failed.' });
+        });
+      return;
+    }
+
+    if (req.url === '/api/v1/action/request' && req.method === 'POST') {
+      withCorsHeaders(res);
+      readJsonBody(req)
+        .then(async (payload) => {
+          const bridge = await ensureAgentBridgeOnline();
+          if (!bridge.ok) {
+            writeJson(res, 409, {
+              ok: false,
+              error: bridge.error,
+            });
+            return;
+          }
+
+          const daemonId = String(payload.daemonId || '').trim();
+          const clientId = String(payload.clientId || '').trim();
+          const signalingServer = String(payload.signalingServer || '').trim();
+          const targetUrl = String(payload.targetUrl || '').trim();
+
+          if (!daemonId || !clientId) {
+            writeJson(res, 400, { ok: false, error: 'daemonId and clientId are required.' });
+            return;
+          }
+
+          const requestId = `action-${Date.now()}`;
+          const setSession = enqueueAgentCommand('set_session', {
+            daemonId,
+            clientId,
+            signalingServer,
+          });
+          const resetConnection = enqueueAgentCommand('disconnect', {
+            reason: 'take_action_reset',
+            requestId,
+          });
+          const connectOnly = enqueueAgentCommand('connect_only', {
+            daemonId,
+            clientId,
+            signalingServer,
+            requestId,
+            forceReconnect: true,
+          });
+          const notifyClient = enqueueAgentCommand('notify_client_action', {
+            daemonId,
+            clientId,
+            signalingServer,
+            targetUrl,
+            requestId,
+          });
+
+          writeJson(res, 200, {
+            ok: true,
+            requestId,
+            commandIds: [setSession.id, resetConnection.id, connectOnly.id, notifyClient.id],
+            bootstrappedAgent: bridge.bootstrapped,
+          });
+        })
+        .catch((error) => {
+          writeJson(res, 400, { ok: false, error: error.message || 'Take Action request failed.' });
+        });
+      return;
+    }
+
+    if (req.url === '/api/v1/share/stop' && req.method === 'POST') {
+      withCorsHeaders(res);
+      ensureAgentBridgeOnline()
+        .then((bridge) => {
+          if (!bridge.ok) {
+            writeJson(res, 409, {
+              ok: false,
+              error: bridge.error,
+            });
+            return;
+          }
+
+          const command = enqueueAgentCommand('disconnect', {});
+          writeJson(res, 200, { ok: true, commandId: command.id, bootstrappedAgent: bridge.bootstrapped });
+        })
+        .catch((error) => {
+          writeJson(res, 400, { ok: false, error: error.message || 'Share stop failed.' });
         });
       return;
     }

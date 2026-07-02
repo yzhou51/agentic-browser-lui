@@ -61,8 +61,9 @@ Node.js pnpm workspace for an agentic browser P2P system with two sub-projects:
 5. Open client demo URL printed by client startup (default `http://127.0.0.1:5174/index.html`).
 6. In client demo:
    - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`).
+   - Ensure `Daemon API URL` points to daemon static server (`http://localhost:8788`).
    - Click `Connect`.
-   - Optional explicit controls: `Launch Chrome` and `Open URL`.
+   - Use Agent workflow buttons to call daemon REST APIs: `Launch Chrome API`, `Open URL API`, `Start Share API`, `Close Page API`, and `Exit Chrome API`.
    - Use viewer mouse and text controls to send commands to daemon.
    - Drag operations are supported through the shared viewer using `mouse_down`, `mouse_move`, and `mouse_up` command replay.
 
@@ -89,6 +90,21 @@ Node.js pnpm workspace for an agentic browser P2P system with two sub-projects:
 - Client-side viewer geometry and mouse-command helpers were moved from the demo into `packages/client/src/sdk/viewerUtils.js` and re-exported by `packages/client/src/sdk/index.js`.
 - Daemon browser-side extension request handling and target-tab forwarding were extracted into `packages/daemon/src/daemon/extensionBridge.browser.js` and `packages/daemon/src/daemon/targetTabForwarding.browser.js`.
 - The daemon static server now exposes those browser modules through `/daemon-src/*` so `public/daemon-agent.js` stays focused on page orchestration and UI state.
+
+## Daemon REST API Overview
+
+Daemon now exposes REST APIs on the static server (default `http://localhost:8788`) for Agent-driven orchestration:
+
+- `POST /api/v1/chrome/launch`
+- `POST /api/v1/page/open`
+- `POST /api/v1/share/start`
+- `POST /api/v1/page/close`
+- `POST /api/v1/chrome/exit`
+- `GET /api/v1/status`
+
+Internally, daemon-agent page polls `/api/v1/agent/commands` and reports execution via `/api/v1/agent/events`.
+
+Runnable curl workflow example is available at `tests/scripts/daemon-rest-api-curl.sh`.
 
 ## Notes
 

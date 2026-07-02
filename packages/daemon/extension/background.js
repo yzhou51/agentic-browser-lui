@@ -121,6 +121,48 @@ async function bindLastActiveTarget() {
   };
 }
 
+async function openTargetTab(url) {
+  const normalizedUrl = String(url || '').trim();
+  if (!normalizedUrl) {
+    return { ok: false, error: 'Target URL is required.' };
+  }
+
+  try {
+    const tab = await chrome.tabs.create({
+      url: normalizedUrl,
+      active: true,
+    });
+
+    if (!tab?.id) {
+      return { ok: false, error: 'Chrome did not return a created tab id.' };
+    }
+
+    controlledTabId = tab.id;
+    lastActiveTargetTabId = tab.id;
+
+    updateTabRecord(tab.id, {
+      url: tab.url || normalizedUrl,
+      title: tab.title || '',
+      active: Boolean(tab.active),
+      status: tab.status || 'loading',
+      windowId: tab.windowId,
+      lastActivatedAt: Date.now(),
+    });
+
+    const descriptor = await getTabDescriptor(tab.id);
+    return {
+      ok: true,
+      controlledTarget: descriptor,
+      message: `Opened target tab: ${normalizedUrl}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message || 'Failed to open target tab through extension.',
+    };
+  }
+}
+
 async function checkControlledTarget() {
   let descriptor = await getTabDescriptor(controlledTabId);
   if (!descriptor) {
@@ -280,6 +322,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (action === 'bind_last_active_target') {
       sendResponse(await bindLastActiveTarget());
+      return;
+    }
+
+    if (action === 'open_target_tab') {
+      sendResponse(await openTargetTab(message?.payload?.url || ''));
       return;
     }
 

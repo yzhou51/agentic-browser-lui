@@ -41,10 +41,13 @@ async function loadRuntimeConfig() {
   hostInput.value = params.get('host') || runtimeConfig.signalingServer || hostInput.value;
 
   let p2p = null;
+  let p2pConnected = false;
   let screenStream = null;
   let targetTabWindow = null;
   let extensionManagedTarget = null;
   let controlTargetMode = null;
+  let agentCommandCursor = 0;
+  let pollingAgentCommands = false;
 
   function setStatus(text) {
     statusEl.textContent = text;
@@ -53,6 +56,37 @@ async function loadRuntimeConfig() {
 
   function appendMessage(message) {
     messagesEl.textContent += `${message}\n`;
+  }
+
+  async function postAgentEvent(payload) {
+    try {
+      await fetch('/api/v1/agent/events', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      // Ignore event-post failures and keep daemon-agent operational.
+    }
+  }
+
+  async function submitLocalDaemonCommand(command) {
+    const response = await fetch('/daemon-agent.command', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(command),
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.ok === false) {
+      throw new Error(payload?.error || payload?.message || 'Local daemon command failed.');
+    }
+
+    return payload;
   }
 
   function setExtensionStatus(message) {
@@ -140,6 +174,10 @@ async function loadRuntimeConfig() {
     return `https://${raw}`;
   }
 
+  function isDaemonAgentTargetUrl(url) {
+    return /\/daemon-agent\.html(?:[?#]|$)/i.test(String(url || ''));
+  }
+
   const forwardCommandToTargetTab = createTargetTabCommandForwarder({
     getTargetWindow: () => targetTabWindow,
     getFallbackViewport: () => ({
@@ -153,9 +191,41 @@ async function loadRuntimeConfig() {
     logger: console,
   });
 
-  async function openTarget(url) {
+  async function openTargetViaExtension(url) {
+    const normalizedUrl = normalizeTargetUrl(url);
+    if (isDaemonAgentTargetUrl(normalizedUrl)) {
+      throw new Error('daemon-agent.html cannot be used as the controlled target page. Use the actual page you want to share/control.');
+    }
+    const response = await extensionBridge.sendExtensionRequest('open_target_tab', { url: normalizedUrl }, 3000);
+    if (!response?.ok) {
+      throw new Error(response?.error || 'Failed to open target tab through extension.');
+    }
+
+    controlTargetMode = 'extension';
+    updateTargetIndicatorFromState({ controlledTarget: response.controlledTarget });
+    setExtensionStatus(`extension-managed target opened: ${formatTargetDescriptor(response.controlledTarget)}`);
+    targetUrlInput.value = normalizedUrl;
+    return response;
+  }
+
+  async function openTarget(url, options = {}) {
     const normalizedUrl = normalizeTargetUrl(url);
     targetUrlInput.value = normalizedUrl;
+
+    if (isDaemonAgentTargetUrl(normalizedUrl)) {
+      throw new Error('daemon-agent.html cannot be used as the controlled target page. Use the actual page you want to share/control.');
+    }
+
+    if (options.preferExtension) {
+      try {
+        return await openTargetViaExtension(normalizedUrl);
+      } catch (error) {
+        console.log('[daemon-agent] openTarget extension path failed, falling back to window.open', {
+          url: normalizedUrl,
+          error: error.message,
+        });
+      }
+    }
 
     if (targetTabWindow && !targetTabWindow.closed) {
       try {
@@ -359,6 +429,23 @@ async function loadRuntimeConfig() {
     return result;
   }
 
+  async function forwardCommandViaPuppeteer(command) {
+    const result = await submitLocalDaemonCommand({
+      type: 'dispatch_target_command',
+      payload: { command },
+    });
+
+    if (command?.type === 'close_page' && result?.ok !== false) {
+      targetTabWindow = null;
+      if (controlTargetMode === 'direct') {
+        controlTargetMode = null;
+      }
+      updateTargetIndicatorFromState({});
+    }
+
+    return result;
+  }
+
 
   async function handleCommand(command) {
     const { type, payload = {} } = command;
@@ -370,6 +457,11 @@ async function loadRuntimeConfig() {
 
     switch (type) {
       case 'open_url':
+        try {
+          return await forwardCommandViaPuppeteer(command);
+        } catch (error) {
+          console.log('[daemon-agent] puppeteer open_url path failed, falling back', { error: error.message });
+        }
         if (shouldUseExtensionManagedTarget()) {
           return forwardCommandViaExtension(command);
         }
@@ -379,6 +471,11 @@ async function loadRuntimeConfig() {
         }
         return forwardCommandViaExtension(command);
       case 'close_page':
+        try {
+          return await forwardCommandViaPuppeteer(command);
+        } catch (error) {
+          console.log('[daemon-agent] puppeteer close_page path failed, falling back', { error: error.message });
+        }
         if (shouldUseExtensionManagedTarget()) {
           return forwardCommandViaExtension(command);
         }
@@ -389,6 +486,11 @@ async function loadRuntimeConfig() {
         return forwardCommandViaExtension(command);
       case 'mouse_move':
         console.debug('[daemon-agent] handleCommand mouse_move', { payload });
+        try {
+          return await forwardCommandViaPuppeteer(command);
+        } catch (error) {
+          console.log('[daemon-agent] puppeteer mouse_move path failed, falling back', { error: error.message });
+        }
         if (shouldUseExtensionManagedTarget()) {
           return forwardCommandViaExtension(command);
         }
@@ -399,6 +501,11 @@ async function loadRuntimeConfig() {
         return forwardCommandViaExtension(command);
       case 'mouse_down':
         console.debug('[daemon-agent] handleCommand mouse_down', { payload });
+        try {
+          return await forwardCommandViaPuppeteer(command);
+        } catch (error) {
+          console.log('[daemon-agent] puppeteer mouse_down path failed, falling back', { error: error.message });
+        }
         if (shouldUseExtensionManagedTarget()) {
           return forwardCommandViaExtension(command);
         }
@@ -409,6 +516,11 @@ async function loadRuntimeConfig() {
         return forwardCommandViaExtension(command);
       case 'mouse_up':
         console.debug('[daemon-agent] handleCommand mouse_up', { payload });
+        try {
+          return await forwardCommandViaPuppeteer(command);
+        } catch (error) {
+          console.log('[daemon-agent] puppeteer mouse_up path failed, falling back', { error: error.message });
+        }
         if (shouldUseExtensionManagedTarget()) {
           return forwardCommandViaExtension(command);
         }
@@ -419,6 +531,11 @@ async function loadRuntimeConfig() {
         return forwardCommandViaExtension(command);
       case 'mouse_click':
         console.debug('[daemon-agent] handleCommand mouse_click', { payload });
+        try {
+          return await forwardCommandViaPuppeteer(command);
+        } catch (error) {
+          console.log('[daemon-agent] puppeteer mouse_click path failed, falling back', { error: error.message });
+        }
         if (shouldUseExtensionManagedTarget()) {
           return forwardCommandViaExtension(command);
         }
@@ -429,6 +546,11 @@ async function loadRuntimeConfig() {
         return forwardCommandViaExtension(command);
       case 'text_input':
         console.debug('[daemon-agent] handleCommand text_input', { payload });
+        try {
+          return await forwardCommandViaPuppeteer(command);
+        } catch (error) {
+          console.log('[daemon-agent] puppeteer text_input path failed, falling back', { error: error.message });
+        }
         if (shouldUseExtensionManagedTarget()) {
           return forwardCommandViaExtension(command);
         }
@@ -439,6 +561,11 @@ async function loadRuntimeConfig() {
         return forwardCommandViaExtension(command);
       case 'key_press':
         console.debug('[daemon-agent] handleCommand key_press', { payload });
+        try {
+          return await forwardCommandViaPuppeteer(command);
+        } catch (error) {
+          console.log('[daemon-agent] puppeteer key_press path failed, falling back', { error: error.message });
+        }
         if (shouldUseExtensionManagedTarget()) {
           return forwardCommandViaExtension(command);
         }
@@ -448,6 +575,11 @@ async function loadRuntimeConfig() {
         }
         return forwardCommandViaExtension(command);
       case 'extension_ping':
+        try {
+          return await forwardCommandViaPuppeteer(command);
+        } catch (error) {
+          console.log('[daemon-agent] puppeteer extension_ping path failed, falling back', { error: error.message });
+        }
         if (shouldUseExtensionManagedTarget()) {
           return checkExtensionManagedTarget();
         }
@@ -469,6 +601,8 @@ async function loadRuntimeConfig() {
     const signalingHost = hostInput.value.trim();
 
     console.debug('[daemon-agent] connect() called', { daemonId, remoteId, signalingHost });
+    appendMessage(`connect requested: daemon=${daemonId} client=${remoteId} signaling=${signalingHost}`);
+    console.log('[daemon-agent] connect requested', { daemonId, remoteId, signalingHost });
 
     if (!daemonId) {
       throw new Error('Daemon ID is required.');
@@ -484,6 +618,7 @@ async function loadRuntimeConfig() {
       p2p.disconnect();
       p2p = null;
     }
+    p2pConnected = false;
 
     const signaling = new window.SignalingChannel();
     p2p = new Owt.P2P.P2PClient({ rtcConfiguration: {} }, signaling);
@@ -497,7 +632,10 @@ async function loadRuntimeConfig() {
     });
 
     p2p.addEventListener('serverdisconnected', () => {
+      console.log('[daemon-agent] signaling server disconnected', { daemonId, remoteId, signalingHost });
+      p2pConnected = false;
       setStatus('Disconnected from signaling server.');
+      appendMessage('signaling server disconnected');
     });
 
     p2p.addEventListener('messagereceived', async (e) => {
@@ -506,10 +644,114 @@ async function loadRuntimeConfig() {
         message: e.message,
       });
       appendMessage(`from ${e.origin}: ${e.message}`);
+      postAgentEvent({
+        kind: 'peer_message',
+        origin: e.origin,
+        message: e.message,
+      }).catch(() => {});
 
       try {
         const command = JSON.parse(e.message);
+
+        if (command?.type === 'resolve') {
+          console.log('[daemon-agent] resolve message received', {
+            origin: e.origin,
+            requestId: command.requestId,
+            payload: command.payload || {},
+          });
+          appendMessage(`resolve received from ${e.origin} (${command.requestId || 'n/a'})`);
+
+          try {
+            await ensureConnected();
+
+            try {
+              window.focus();
+              console.log('[daemon-agent] resolve requested window focus before capture');
+            } catch (focusError) {
+              console.log('[daemon-agent] resolve window focus failed', {
+                requestId: command.requestId,
+                error: focusError.message,
+              });
+            }
+
+            try {
+              const preparedTarget = await submitLocalDaemonCommand({ type: 'prepare_share_target', payload: {} });
+              console.log('[daemon-agent] prepared share target before capture', preparedTarget);
+              appendMessage(`share target prepared: ${JSON.stringify(preparedTarget)}`);
+            } catch (prepareError) {
+              console.log('[daemon-agent] prepare share target failed', {
+                requestId: command.requestId,
+                error: prepareError.message,
+              });
+              appendMessage(`prepare share target failed: ${prepareError.message}`);
+            }
+
+            await shareScreen({ automated: true });
+            if (!screenStream) {
+              throw new Error('share failed or was cancelled by user.');
+            }
+
+            await p2p.send(
+              e.origin,
+              JSON.stringify({
+                type: 'resolve_result',
+                requestId: command.requestId,
+                ok: true,
+                result: {
+                  message: 'resolve accepted; sharing started',
+                },
+              })
+            );
+
+            postAgentEvent({
+              kind: 'peer_command_result',
+              requestId: command.requestId,
+              type: 'resolve',
+              ok: true,
+              message: 'resolve accepted; sharing started',
+              error: '',
+              bridge: 'p2p',
+            }).catch(() => {});
+          } catch (resolveError) {
+            console.log('[daemon-agent] resolve processing failed', {
+              requestId: command.requestId,
+              error: resolveError.message,
+            });
+            appendMessage(`resolve failed: ${resolveError.message}`);
+
+            await p2p.send(
+              e.origin,
+              JSON.stringify({
+                type: 'resolve_result',
+                requestId: command.requestId,
+                ok: false,
+                error: resolveError.message,
+              })
+            );
+
+            postAgentEvent({
+              kind: 'peer_command_result',
+              requestId: command.requestId,
+              type: 'resolve',
+              ok: false,
+              message: '',
+              error: resolveError.message,
+              bridge: 'p2p',
+            }).catch(() => {});
+          }
+          return;
+        }
+
         const body = await handleCommand(command);
+        postAgentEvent({
+          kind: 'peer_command_result',
+          requestId: command.requestId,
+          type: command.type,
+          ok: body?.ok !== false,
+          message: body?.message || '',
+          error: body?.error || '',
+          bridge: body?.bridge || '',
+        }).catch(() => {});
         console.log('[daemon-agent] command processed', {
           requestId: command.requestId,
           type: command.type,
@@ -530,6 +772,11 @@ async function loadRuntimeConfig() {
         );
       } catch (error) {
         appendMessage(`command error: ${error.message}`);
+        postAgentEvent({
+          kind: 'peer_command_result',
+          ok: false,
+          error: error.message,
+        }).catch(() => {});
         try {
           await p2p.send(
             e.origin,
@@ -546,12 +793,38 @@ async function loadRuntimeConfig() {
     });
 
     await p2p.connect({ host: signalingHost, token: daemonId });
+    p2pConnected = true;
     uidInput.disabled = true;
+    console.log('[daemon-agent] connected to signaling server', { daemonId, remoteId, signalingHost });
+    appendMessage(`connected to signaling: daemon=${daemonId} client=${remoteId}`);
     setStatus(`Connected as ${daemonId}. Waiting for ${remoteId} messages.`);
+    await postAgentEvent({
+      kind: 'status',
+      status: 'connected',
+      state: {
+        daemonId,
+        clientId: remoteId,
+        signalingServer: signalingHost,
+      },
+    });
+
+    return p2p;
   }
 
-  async function shareScreen() {
-    console.log('[daemon-agent] shareScreen called');
+  async function ensureConnected() {
+    if (p2p && p2pConnected) {
+      return p2p;
+    }
+
+    return connect();
+  }
+
+  async function shareScreen({ automated = false } = {}) {
+    console.log('[daemon-agent] shareScreen called', {
+      automated,
+      controlTargetMode,
+      targetUrl: targetUrlInput?.value || '',
+    });
     if (!p2p) {
       setStatus('Connect first.');
       return;
@@ -563,40 +836,63 @@ async function loadRuntimeConfig() {
       return;
     }
 
+    await ensureConnected();
+
     if (screenStream && screenStream.mediaStream) {
       screenStream.mediaStream.getTracks().forEach((track) => track.stop());
       screenStream = null;
     }
 
     let mediaStream;
+    let manualPromptShown = false;
     try {
-      if (targetTabWindow && !targetTabWindow.closed && targetTabWindow !== window) {
+      if (!automated && targetTabWindow && !targetTabWindow.closed && targetTabWindow !== window) {
         try {
           targetTabWindow.focus();
         } catch {
           // Ignore focus failures and keep best-effort tab selection guidance.
         }
+        manualPromptShown = true;
         setStatus('Please select the opened target tab in the browser picker to share it.');
-      } else if (extensionManagedTarget) {
+      } else if (!automated && extensionManagedTarget) {
         try {
           const activated = await activateExtensionManagedTarget();
+          manualPromptShown = true;
           setStatus(
             `Please select the extension-managed target tab in the browser picker: ${formatTargetDescriptor(activated.controlledTarget)}`
           );
         } catch (error) {
+          manualPromptShown = true;
           setStatus(`Share hint: extension-managed target could not be activated (${error.message}). Select the bound tab manually.`);
         }
       }
+
+      console.log('[daemon-agent] requesting getDisplayMedia', {
+        automated,
+        manualPromptShown,
+        controlTargetMode,
+      });
       mediaStream = await navigator.mediaDevices.getDisplayMedia({
         video: { displaySurface: 'browser' },
         audio: false,
       });
     } catch (error) {
+      console.log('[daemon-agent] getDisplayMedia failed', {
+        automated,
+        manualPromptShown,
+        error: error.message,
+      });
       setStatus(`Share error: ${error.message}`);
       return;
     }
 
     const sharedTrackLabel = getSharedTrackLabel(mediaStream);
+    console.log('[daemon-agent] getDisplayMedia acquired', {
+      automated,
+      manualPromptShown,
+      sharedTrackLabel,
+      controlTargetMode,
+    });
     if (!looksLikeCorrectSharedTarget(sharedTrackLabel)) {
       setStatus(
         `Share warning: selected stream looks like "${sharedTrackLabel}" but controlled tab is ${formatTargetDescriptor(extensionManagedTarget)}`
@@ -628,6 +924,19 @@ async function loadRuntimeConfig() {
         ? `Screen stream published (${sharedTrackLabel}).`
         : 'Screen stream published.'
     );
+
+    await postAgentEvent({
+      kind: 'status',
+      status: 'sharing',
+      state: {
+        automated,
+        manualPromptShown,
+        controlTargetMode,
+        targetUrl: targetUrlInput?.value || '',
+        targetDescriptor: formatTargetDescriptor(extensionManagedTarget),
+        sharedTrackLabel,
+      },
+    });
   }
 
   const initialScreenShareReason = getScreenShareUnavailableReason();
@@ -637,14 +946,199 @@ async function loadRuntimeConfig() {
   }
 
   async function disconnect() {
+    if (screenStream?.mediaStream) {
+      try {
+        screenStream.mediaStream.getTracks().forEach((track) => track.stop());
+      } catch {
+        // Ignore track stop errors during cleanup.
+      }
+      screenStream = null;
+    }
+
     if (p2p) {
       p2p.disconnect();
       p2p = null;
     }
+    p2pConnected = false;
     uidInput.disabled = false;
     controlTargetMode = null;
     updateTargetIndicatorFromState({});
     setStatus('Disconnected.');
+    await postAgentEvent({
+      kind: 'status',
+      status: 'disconnected',
+    });
+  }
+
+  async function executeAgentCommand(command) {
+    const type = String(command?.type || '');
+    const payload = command?.payload || {};
+
+    switch (type) {
+      case 'set_session': {
+        if (typeof payload.daemonId === 'string' && payload.daemonId.trim()) {
+          uidInput.value = payload.daemonId.trim();
+        }
+        if (typeof payload.clientId === 'string' && payload.clientId.trim()) {
+          remoteInput.value = payload.clientId.trim();
+        }
+        if (typeof payload.signalingServer === 'string' && payload.signalingServer.trim()) {
+          hostInput.value = payload.signalingServer.trim();
+        }
+        return { ok: true, message: 'session updated' };
+      }
+      case 'open_target': {
+        const result = await submitLocalDaemonCommand({
+          type: 'open_target_page',
+          payload: {
+            url: payload.url || targetUrlInput.value,
+          },
+        });
+        targetUrlInput.value = payload.url || targetUrlInput.value;
+        controlTargetMode = 'puppeteer';
+        setTargetIndicator(`puppeteer-managed: ${payload.url || targetUrlInput.value}`);
+        setExtensionStatus('using Puppeteer target control');
+        return result;
+      }
+      case 'close_target': {
+        const result = await submitLocalDaemonCommand({ type: 'close_target_page', payload: {} });
+        controlTargetMode = null;
+        updateTargetIndicatorFromState({});
+        return result;
+      }
+      case 'connect_share': {
+        if (typeof payload.daemonId === 'string' && payload.daemonId.trim()) {
+          uidInput.value = payload.daemonId.trim();
+        }
+        if (typeof payload.clientId === 'string' && payload.clientId.trim()) {
+          remoteInput.value = payload.clientId.trim();
+        }
+
+        await ensureConnected();
+        await shareScreen({ automated: Boolean(payload.automated) });
+        if (!screenStream) {
+          return { ok: false, error: 'share failed or was cancelled by user.' };
+        }
+        return { ok: true, message: 'connect and share completed' };
+      }
+      case 'connect_only': {
+        if (typeof payload.daemonId === 'string' && payload.daemonId.trim()) {
+          uidInput.value = payload.daemonId.trim();
+        }
+        if (typeof payload.clientId === 'string' && payload.clientId.trim()) {
+          remoteInput.value = payload.clientId.trim();
+        }
+        if (typeof payload.signalingServer === 'string' && payload.signalingServer.trim()) {
+          hostInput.value = payload.signalingServer.trim();
+        }
+
+        console.log('CONNECT_ONLY_RECEIVED', {
+          daemonId: uidInput.value.trim(),
+          clientId: remoteInput.value.trim(),
+          signalingServer: hostInput.value.trim(),
+          requestId: payload.requestId || '',
+          forceReconnect: Boolean(payload.forceReconnect),
+        });
+        appendMessage(`CONNECT_ONLY_RECEIVED daemon=${uidInput.value.trim()} client=${remoteInput.value.trim()} signaling=${hostInput.value.trim()}`);
+
+        if (payload.forceReconnect) {
+          appendMessage('CONNECT_ONLY forceReconnect requested: resetting existing signaling/share state first.');
+          await disconnect();
+        }
+
+        await ensureConnected();
+
+        console.log('CONNECT_ONLY_CONNECTED', {
+          daemonId: uidInput.value.trim(),
+          clientId: remoteInput.value.trim(),
+          signalingServer: hostInput.value.trim(),
+          requestId: payload.requestId || '',
+        });
+        appendMessage(`CONNECT_ONLY_CONNECTED daemon=${uidInput.value.trim()} client=${remoteInput.value.trim()} signaling=${hostInput.value.trim()}`);
+
+        return { ok: true, message: 'connected to signaling and waiting for resolve' };
+      }
+      case 'notify_client_action': {
+        await ensureConnected();
+
+        const targetClientId = String(payload.clientId || remoteInput.value || '').trim();
+        if (!targetClientId) {
+          return { ok: false, error: 'clientId is required to notify client.' };
+        }
+
+        await p2p.send(
+          targetClientId,
+          JSON.stringify({
+            type: 'action_request',
+            requestId: payload.requestId || `action-${Date.now()}`,
+            payload: {
+              daemonId: String(payload.daemonId || uidInput.value || '').trim(),
+              clientId: targetClientId,
+              signalingServer: String(payload.signalingServer || hostInput.value || '').trim(),
+              targetUrl: String(payload.targetUrl || targetUrlInput.value || '').trim(),
+            },
+          })
+        );
+
+        return { ok: true, message: `action request notification sent to ${targetClientId}` };
+      }
+      case 'disconnect': {
+        await disconnect();
+        return { ok: true, message: 'disconnected' };
+      }
+      default:
+        return { ok: false, error: `Unsupported agent command: ${type}` };
+    }
+  }
+
+  async function pollAgentCommands() {
+    if (pollingAgentCommands) {
+      return;
+    }
+
+    pollingAgentCommands = true;
+    try {
+      const response = await fetch(`/api/v1/agent/commands?after=${encodeURIComponent(agentCommandCursor)}`, {
+        cache: 'no-store',
+      });
+      if (!response.ok) {
+        return;
+      }
+
+      const body = await response.json();
+      const commands = Array.isArray(body.commands) ? body.commands : [];
+      for (const command of commands) {
+        try {
+          const result = await executeAgentCommand(command);
+          await postAgentEvent({
+            kind: 'command_result',
+            commandId: command.id,
+            type: command.type,
+            ok: result?.ok !== false,
+            message: result?.message || '',
+            error: result?.error || '',
+          });
+        } catch (error) {
+          await postAgentEvent({
+            kind: 'command_result',
+            commandId: command.id,
+            type: command.type,
+            ok: false,
+            error: error.message,
+          });
+        }
+      }
+
+      if (typeof body.cursor === 'number') {
+        agentCommandCursor = body.cursor;
+      } else if (commands.length) {
+        agentCommandCursor = commands[commands.length - 1].id;
+      }
+    } catch {
+      // Ignore polling errors to keep page interactive.
+    } finally {
+      pollingAgentCommands = false;
+    }
   }
 
   document.getElementById('connect').addEventListener('click', () => {
@@ -703,7 +1197,24 @@ async function loadRuntimeConfig() {
   setExtensionStatus('not checked');
   setTargetIndicator('none');
   window.setInterval(() => {
+    postAgentEvent({
+      kind: 'heartbeat',
+      state: {
+        daemonId: uidInput.value.trim(),
+        clientId: remoteInput.value.trim(),
+        signalingServer: hostInput.value.trim(),
+        connected: Boolean(p2p),
+        sharing: Boolean(screenStream),
+        controlTargetMode,
+      },
+    }).catch(() => {});
+  }, 3000);
+  window.setInterval(() => {
+    pollAgentCommands().catch(() => {});
+  }, 1000);
+  window.setInterval(() => {
     refreshExtensionStatus().catch(() => {});
   }, 2000);
+  pollAgentCommands().catch(() => {});
   refreshExtensionStatus().catch(() => {});
 })();
