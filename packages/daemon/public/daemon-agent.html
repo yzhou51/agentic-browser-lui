@@ -65,6 +65,18 @@
         padding: 12px;
       }
       .status { color: var(--accent); }
+      .target-indicator {
+        margin-top: 8px;
+        padding: 8px 10px;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        background: #0b1220;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .target-indicator strong {
+        color: var(--fg);
+      }
       .target-row {
         display: flex;
         gap: 8px;
@@ -107,6 +119,12 @@
           <input id="targetUrl" value="/target-demo.html" />
           <button id="openTarget">Open Target Tab</button>
           <button id="openTargetTab">Open In New Tab</button>
+          <button id="bindLastActiveTarget">Bind Last Active Tab</button>
+          <button id="checkExtension">Check Extension</button>
+        </div>
+        <p class="status" id="extensionStatus">Extension status: not checked.</p>
+        <div class="target-indicator" id="targetIndicator">
+          <strong>Controlled tab:</strong> none
         </div>
         <iframe id="targetFrame" class="target-frame" title="Target Page" src="/target-demo.html"></iframe>
       </div>
@@ -116,7 +134,7 @@
       </div>
     </div>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/3.1.2/socket.io.js"></script>
+    <script src="./vendor/socket.io.min.js"></script>
     <script src="./vendor/sc.websocket.js"></script>
     <script src="./vendor/owt.js"></script>
     <script type="module" src="./daemon-agent.js"></script>

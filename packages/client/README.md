@@ -3,6 +3,7 @@
 Client subproject includes:
 
 - SDK: `src/sdk/AgenticBrowserClient.js`
+- Viewer helpers: `src/sdk/viewerUtils.js`
 - Demo UI: Vite app in `index.html` and `src/demo/main.js`
 
 ## Dev
@@ -51,3 +52,22 @@ await client.connect({
 });
 await client.sendCommand('open_url', { url: 'https://example.com' });
 ```
+
+## SDK exports
+
+`src/sdk/index.js` re-exports:
+
+- `AgenticBrowserClient`
+- `getRenderedVideoContentRect`
+- `mapPointerToVideoSpace`
+- `getPointerButtonName`
+- `buildViewerMousePayload`
+- `createViewerMouseCommandSender`
+
+These helpers were extracted from the demo so other client UIs can reuse the same video-space coordinate mapping and mouse command packaging logic.
+
+## Demo behavior
+
+- `src/demo/main.js` now consumes the shared SDK viewer helpers instead of owning duplicate geometry logic.
+- Drag interactions are sent as `mouse_down`, `mouse_move`, and `mouse_up` commands so the daemon can replay press-and-drag flows on the shared page.
+- Static mode serves vendored browser dependencies locally, including `public/vendor/socket.io.min.js`, to avoid CDN dependencies during signaling setup.

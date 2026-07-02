@@ -15,8 +15,17 @@ const MIME_TYPES = {
   '.map': 'application/json; charset=utf-8',
 };
 
-function resolveSafePath(rootDir, reqPath) {
+function resolveSafePath(rootDir, browserModuleDir, reqPath) {
   const rawPath = decodeURIComponent(reqPath.split('?')[0]);
+  if (rawPath.startsWith('/daemon-src/')) {
+    const relativeModulePath = rawPath.replace(/^\/daemon-src\//, '');
+    const candidate = path.resolve(browserModuleDir, relativeModulePath);
+    if (!candidate.startsWith(path.resolve(browserModuleDir))) {
+      return null;
+    }
+    return candidate;
+  }
+
   const normalized = rawPath === '/' ? '/daemon-agent.html' : rawPath;
   const relative = normalized.replace(/^\/+/, '');
   const candidate = path.resolve(rootDir, relative);
@@ -54,7 +63,7 @@ function readJsonBody(req) {
   });
 }
 
-export function startStaticServer({ rootDir, host, port, daemonAgentConfig, submitCommand }) {
+export function startStaticServer({ rootDir, browserModuleDir, host, port, daemonAgentConfig, submitCommand }) {
   const server = http.createServer((req, res) => {
     if (!req.url) {
       res.writeHead(400);
@@ -100,7 +109,7 @@ export function startStaticServer({ rootDir, host, port, daemonAgentConfig, subm
       return;
     }
 
-    const filePath = resolveSafePath(rootDir, req.url);
+    const filePath = resolveSafePath(rootDir, browserModuleDir, req.url);
     if (!filePath) {
       res.writeHead(403);
       res.end('Forbidden');

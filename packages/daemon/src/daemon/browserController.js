@@ -41,6 +41,18 @@ export class BrowserController {
     await this.page.mouse.move(Number(x), Number(y));
   }
 
+  async mouseDown(x, y, button = 'left') {
+    if (!this.page) return;
+    await this.page.mouse.move(Number(x), Number(y));
+    await this.page.mouse.down({ button });
+  }
+
+  async mouseUp(x, y, button = 'left') {
+    if (!this.page) return;
+    await this.page.mouse.move(Number(x), Number(y));
+    await this.page.mouse.up({ button });
+  }
+
   async clickMouse(x, y, button = 'left') {
     if (!this.page) return;
     await this.page.mouse.click(Number(x), Number(y), { button });

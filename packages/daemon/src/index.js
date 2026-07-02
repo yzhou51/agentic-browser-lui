@@ -38,6 +38,7 @@ if (process.argv.length > 2) {
   cli.parse(process.argv);
 } else {
   const publicDir = path.resolve(__dirname, '../public');
+  const browserModuleDir = path.resolve(__dirname, './daemon');
   const openHost =
     config.staticServerHost === '0.0.0.0' || config.staticServerHost === '::'
       ? 'localhost'
@@ -46,6 +47,7 @@ if (process.argv.length > 2) {
 
   const server = await startStaticServer({
     rootDir: publicDir,
+    browserModuleDir,
     host: config.staticServerHost,
     port: config.staticServerPort,
     daemonAgentConfig: session,

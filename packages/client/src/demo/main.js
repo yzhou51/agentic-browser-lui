@@ -1,4 +1,7 @@
-import { AgenticBrowserClient } from '../sdk/index.js';
+import {
+  AgenticBrowserClient,
+  createViewerMouseCommandSender,
+} from '../sdk/index.js';
 
 async function loadRuntimeConfig() {
   try {
@@ -16,6 +19,8 @@ async function loadRuntimeConfig() {
 async function init() {
   const runtimeConfig = await loadRuntimeConfig();
   const client = new AgenticBrowserClient();
+  let activePointerId = null;
+  let isMousePressed = false;
 
   const el = {
     clientId: document.getElementById('clientId'),
@@ -54,6 +59,10 @@ async function init() {
     el.logs.textContent += `${message}\n`;
   }
 
+  function logJson(label, value) {
+    log(`${label}: ${JSON.stringify(value)}`);
+  }
+
   function setStatus(state, message) {
     el.status.dataset.state = state;
     el.status.textContent = message;
@@ -64,91 +73,36 @@ async function init() {
       return;
     }
 
+    console.log('[client] sendTextInput', { text, textLength: text.length });
     const requestId = await client.sendCommand('text_input', { text });
     log(`text_input sent (${requestId}): ${JSON.stringify(text)}`);
   }
 
   async function sendKeyPress(key) {
+    console.log('[client] sendKeyPress', { key });
     const requestId = await client.sendCommand('key_press', { key });
     log(`key_press sent (${requestId}): ${key}`);
   }
 
-  function getRenderedVideoContentRect() {
-    const rect = el.remoteVideo.getBoundingClientRect();
-    const sourceWidth = el.remoteVideo.videoWidth || rect.width;
-    const sourceHeight = el.remoteVideo.videoHeight || rect.height;
-
-    const containerAspect = rect.width / rect.height;
-    const sourceAspect = sourceWidth / sourceHeight;
-
-    let contentWidth = rect.width;
-    let contentHeight = rect.height;
-    let offsetX = 0;
-    let offsetY = 0;
-
-    if (Number.isFinite(containerAspect) && Number.isFinite(sourceAspect) && sourceWidth > 0 && sourceHeight > 0) {
-      if (sourceAspect > containerAspect) {
-        contentHeight = rect.width / sourceAspect;
-        offsetY = (rect.height - contentHeight) / 2;
-      } else {
-        contentWidth = rect.height * sourceAspect;
-        offsetX = (rect.width - contentWidth) / 2;
-      }
-    }
-
-    return {
-      rect,
-      sourceWidth,
-      sourceHeight,
-      contentWidth,
-      contentHeight,
-      offsetX,
-      offsetY,
-      containerAspect,
-      sourceAspect,
-    };
-  }
-
-  function mapPointerToVideoSpace(event) {
-    const videoBox = getRenderedVideoContentRect();
-    const localX = event.clientX - videoBox.rect.left - videoBox.offsetX;
-    const localY = event.clientY - videoBox.rect.top - videoBox.offsetY;
-
-    const clampedX = Math.max(0, Math.min(videoBox.contentWidth - 1, localX));
-    const clampedY = Math.max(0, Math.min(videoBox.contentHeight - 1, localY));
-
-    const x = Math.max(0, Math.min(videoBox.sourceWidth - 1, Math.round((clampedX / videoBox.contentWidth) * videoBox.sourceWidth)));
-    const y = Math.max(0, Math.min(videoBox.sourceHeight - 1, Math.round((clampedY / videoBox.contentHeight) * videoBox.sourceHeight)));
-
-    const mapped = {
-      x,
-      y,
-      sourceWidth: videoBox.sourceWidth,
-      sourceHeight: videoBox.sourceHeight,
-      videoRect: {
-        width: Math.round(videoBox.rect.width),
-        height: Math.round(videoBox.rect.height),
-      },
-      contentRect: {
-        width: Math.round(videoBox.contentWidth),
-        height: Math.round(videoBox.contentHeight),
-        offsetX: Math.round(videoBox.offsetX),
-        offsetY: Math.round(videoBox.offsetY),
-      },
-      pointer: {
-        clientX: Math.round(event.clientX),
-        clientY: Math.round(event.clientY),
-      },
-    };
-
-    console.debug('[client] pointer mapped', mapped);
-    return mapped;
-  }
+  const sendMouseCommand = createViewerMouseCommandSender({
+    sendCommand: (type, payload) => client.sendCommand(type, payload),
+    videoElement: el.remoteVideo,
+    getIsDragging: () => isMousePressed,
+    onPointerMapped: (mapped) => {
+      console.debug('[client] pointer mapped', mapped);
+    },
+    onBeforeSend: ({ type, payload }) => {
+      console.log('[client] sendMouseCommand', { type, payload });
+    },
+    onAfterSend: ({ type, mapped, requestId }) => {
+      log(`${type} sent (${requestId}) at (${mapped.x}, ${mapped.y}) in ${mapped.sourceWidth}x${mapped.sourceHeight}.`);
+    },
+  });
 
   client.onRemoteStream = (stream) => {
     if (stream?.mediaStream) {
       el.remoteVideo.srcObject = stream.mediaStream;
-      el.remoteVideo.play().catch(() => {});
+      el.remoteVideo.play().catch(() => { });
       setStatus('active', `Connected to daemon ${el.daemonId.value} and receiving remote stream.`);
       log('Remote stream attached.');
     }
@@ -159,10 +113,14 @@ async function init() {
       const parsed = JSON.parse(message);
       if (parsed.type === 'command_result') {
         setStatus('active', `Connected to daemon ${origin}. Last command result received.`);
+        console.log('[client] command_result received', parsed);
         log(
           `Result ${parsed.requestId || 'n/a'} from ${origin}: ${parsed.ok ? 'ok' : 'failed'} ` +
           `${parsed.error ? `(${parsed.error})` : ''}`
         );
+        if (parsed.result) {
+          logJson(`Result body ${parsed.requestId || 'n/a'}`, parsed.result);
+        }
         return;
       }
     } catch {
@@ -329,58 +287,106 @@ async function init() {
     }
   });
 
-  el.remoteVideo.addEventListener('click', async (event) => {
+  el.remoteVideo.addEventListener('pointerdown', async (event) => {
     event.preventDefault();
     el.textCapture.value = '';
     el.textCapture.focus();
     el.textCapture.setSelectionRange(0, 0);
     log('Remote viewer clicked. Text capture is active.');
 
-    const { x, y, sourceWidth, sourceHeight } = mapPointerToVideoSpace(event);
+    activePointerId = event.pointerId;
+    isMousePressed = true;
 
-    console.debug('[client] remoteVideo click', {
-      x,
-      y,
-      sourceWidth,
-      sourceHeight,
-      videoWidth: el.remoteVideo.videoWidth,
-      videoHeight: el.remoteVideo.videoHeight,
-    });
+    if (typeof el.remoteVideo.setPointerCapture === 'function') {
+      try {
+        el.remoteVideo.setPointerCapture(event.pointerId);
+      } catch {
+        // Ignore pointer capture failures and keep best-effort drag support.
+      }
+    }
 
     try {
-      const requestId = await client.sendCommand('mouse_click', {
-        x,
-        y,
-        button: 'left',
-        sourceWidth,
-        sourceHeight,
-      });
-      log(`mouse_click sent (${requestId}) at (${x}, ${y}) in ${sourceWidth}x${sourceHeight}.`);
+      await sendMouseCommand('mouse_down', event);
+    } catch (error) {
+      log(`mouse_down failed: ${error.message}`);
+    }
+  });
+
+  el.remoteVideo.addEventListener('click', async (event) => {
+    event.preventDefault();
+
+    try {
+      await sendMouseCommand('mouse_click', event);
     } catch (error) {
       log(`mouse_click failed: ${error.message}`);
     }
   });
 
-  el.remoteVideo.addEventListener('mousemove', async (event) => {
+  el.remoteVideo.addEventListener('pointermove', async (event) => {
     if ((event.timeStamp | 0) % 7 !== 0) {
       return;
     }
-    const { x, y, sourceWidth, sourceHeight } = mapPointerToVideoSpace(event);
-
-    console.debug('[client] remoteVideo move', {
-      x,
-      y,
-      sourceWidth,
-      sourceHeight,
-      videoWidth: el.remoteVideo.videoWidth,
-      videoHeight: el.remoteVideo.videoHeight,
-    });
 
     try {
-      await client.sendCommand('mouse_move', { x, y, sourceWidth, sourceHeight });
+      await sendMouseCommand('mouse_move', event, {
+        isDragging: isMousePressed,
+      });
     } catch {
       // Keep cursor movement lightweight and silent on temporary send errors.
     }
+  });
+
+  async function releasePointer(event, reason) {
+    if (!isMousePressed) {
+      return;
+    }
+
+    if (activePointerId != null && event.pointerId != null && event.pointerId !== activePointerId) {
+      return;
+    }
+
+    isMousePressed = false;
+
+    if (activePointerId != null && typeof el.remoteVideo.releasePointerCapture === 'function') {
+      try {
+        el.remoteVideo.releasePointerCapture(activePointerId);
+      } catch {
+        // Ignore release failures.
+      }
+    }
+
+    activePointerId = null;
+
+    try {
+      await sendMouseCommand('mouse_up', event, { releaseReason: reason, isDragging: false });
+    } catch (error) {
+      log(`mouse_up failed: ${error.message}`);
+    }
+  }
+
+  el.remoteVideo.addEventListener('pointerup', async (event) => {
+    event.preventDefault();
+    await releasePointer(event, 'pointerup');
+  });
+
+  el.remoteVideo.addEventListener('pointercancel', async (event) => {
+    event.preventDefault();
+    await releasePointer(event, 'pointercancel');
+  });
+
+  el.remoteVideo.addEventListener('lostpointercapture', async () => {
+    if (!isMousePressed) {
+      return;
+    }
+
+    const syntheticEvent = {
+      button: 0,
+      pointerId: activePointerId,
+      clientX: 0,
+      clientY: 0,
+      timeStamp: performance.now(),
+    };
+    await releasePointer(syntheticEvent, 'lostpointercapture');
   });
 
   el.remoteVideo.addEventListener('focus', () => {
