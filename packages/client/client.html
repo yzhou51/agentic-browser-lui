@@ -19,6 +19,7 @@
           <h2>Client</h2>
           <div class="grid">
             <label>Client ID<input id="clientId" value="client-1" /></label>
+            <label>Remote ID<input id="remoteId" value="daemon-1" /></label>
             <label>Signaling URL<input id="signalingUrl" value="http://localhost:8095" /></label>
           </div>
           <div class="actions">
@@ -29,7 +30,7 @@
 
         <div class="subgroup action-request" id="actionRequestPanel">
           <h2>Take Action Request</h2>
-          <p id="actionRequestMessage" class="subgroup-note">No pending action request.</p>
+          <p id="actionRequestMessage" class="subgroup-note">No pending action request. Manual mode is available with Remote ID.</p>
           <div class="actions">
             <button id="resolveBtn" disabled>Resolve</button>
           </div>
@@ -57,7 +58,7 @@
     <script src="/vendor/sc.websocket.js"></script>
     <script src="/vendor/owt.js"></script>
     <script type="module">
-      import(`/src/demo/main.js?ts=${Date.now()}`);
+      import(`/src/demo/client.js?ts=${Date.now()}`);
     </script>
   </body>
 </html>

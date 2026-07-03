@@ -4,7 +4,7 @@ Client subproject includes:
 
 - SDK: `src/sdk/AgenticBrowserClient.js`
 - Viewer helpers: `src/sdk/viewerUtils.js`
-- Demo UI: Vite app in `index.html` and `src/demo/main.js`
+- Demo UI: Vite app in `client.html` and `src/demo/client.js`
 
 ## Dev
 
@@ -21,12 +21,12 @@ From workspace root, equivalent command is `pnpm dev:client`.
 
 From workspace root, equivalent command is `pnpm start:client`.
 
-This starts a local static server for this package and prints an `http://.../index.html` URL.
+This starts a local static server for this package and prints an `http://.../client.html` URL.
 Runtime defaults are generated from `.env` into `client-demo.runtime.json`.
 
 Pages:
 
-- `index.html`: remote client viewer/input page.
+- `client.html`: remote client viewer/input page.
 - `agent.html`: daemon REST action page (launch/close Chrome, open target, send Take Action request).
 
 Default static server listen host is `0.0.0.0`, default port is `5174`.
@@ -73,10 +73,10 @@ These helpers were extracted from the demo so other client UIs can reuse the sam
 
 ## Demo behavior
 
-- `src/demo/main.js` now consumes the shared SDK viewer helpers instead of owning duplicate geometry logic.
+- `src/demo/client.js` now consumes the shared SDK viewer helpers instead of owning duplicate geometry logic.
 - Drag interactions are sent as `mouse_down`, `mouse_move`, and `mouse_up` commands so the daemon can replay press-and-drag flows on the shared page.
 - Static mode serves vendored browser dependencies locally, including `public/vendor/socket.io.min.js`, to avoid CDN dependencies during signaling setup.
-- The client page (`src/demo/main.js`) now focuses on viewer/input control only.
+- The client page (`src/demo/client.js`) now focuses on viewer/input control only.
 - Agent REST actions are extracted to `agent.html` (`src/demo/agent.js`):
   - launch Chrome with custom path/params,
   - open target URL,

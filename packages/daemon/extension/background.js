@@ -281,13 +281,31 @@ async function dispatchCommand(command) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  let responded = false;
+  const respond = (payload) => {
+    if (responded) {
+      return;
+    }
+    responded = true;
+    try {
+      sendResponse(payload);
+    } catch {
+      // Sender may be gone (tab navigated/closed). Ignore in service worker.
+    }
+  };
+
+  // Avoid leaving the channel open if any async path hangs.
+  const responseTimeout = setTimeout(() => {
+    respond({ ok: false, error: 'Extension background request timed out.' });
+  }, 5000);
+
   (async () => {
     const type = String(message?.type || '');
 
     if (type === 'agentic-register-page') {
       const tabId = sender.tab?.id;
       if (!tabId) {
-        sendResponse({ ok: false, error: 'Missing sender tab.' });
+        respond({ ok: false, error: 'Missing sender tab.' });
         return;
       }
 
@@ -304,50 +322,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         lastActiveTargetTabId = tabId;
       }
 
-      sendResponse({ ok: true });
+      respond({ ok: true });
       return;
     }
 
     if (type !== 'agentic-daemon-request') {
-      sendResponse({ ok: false, error: `Unsupported runtime message type: ${type}` });
+      respond({ ok: false, error: `Unsupported runtime message type: ${type}` });
       return;
     }
 
     const action = String(message?.action || '');
 
     if (action === 'get_status') {
-      sendResponse(await getStatus());
+      respond(await getStatus());
       return;
     }
 
     if (action === 'bind_last_active_target') {
-      sendResponse(await bindLastActiveTarget());
+      respond(await bindLastActiveTarget());
       return;
     }
 
     if (action === 'open_target_tab') {
-      sendResponse(await openTargetTab(message?.payload?.url || ''));
+      respond(await openTargetTab(message?.payload?.url || ''));
       return;
     }
 
     if (action === 'check_controlled_target') {
-      sendResponse(await checkControlledTarget());
+      respond(await checkControlledTarget());
       return;
     }
 
     if (action === 'activate_controlled_target') {
-      sendResponse(await activateControlledTarget());
+      respond(await activateControlledTarget());
       return;
     }
 
     if (action === 'dispatch_command') {
-      sendResponse(await dispatchCommand(message?.payload?.command || {}));
+      respond(await dispatchCommand(message?.payload?.command || {}));
       return;
     }
 
-    sendResponse({ ok: false, error: `Unsupported daemon request action: ${action}` });
+    respond({ ok: false, error: `Unsupported daemon request action: ${action}` });
   })().catch((error) => {
-    sendResponse({ ok: false, error: error?.message || 'Extension background request failed.' });
+    respond({ ok: false, error: error?.message || 'Extension background request failed.' });
+  }).finally(() => {
+    clearTimeout(responseTimeout);
   });
 
   return true;

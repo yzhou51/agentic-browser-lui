@@ -49,7 +49,7 @@ const MIME_TYPES = {
 
 function resolveSafePath(reqPath) {
   const rawPath = decodeURIComponent(reqPath.split('?')[0]);
-  const normalized = rawPath === '/' ? '/index.html' : rawPath;
+  const normalized = rawPath === '/' ? '/client.html' : rawPath;
   const relative = normalized.replace(/^\/+/, '');
   const baseDir = relative.startsWith('vendor/') ? path.resolve(rootDir, 'public') : rootDir;
   const candidate = path.resolve(baseDir, relative);
@@ -112,7 +112,7 @@ server.on('error', (error) => {
 server.listen(staticPort, staticHost, () => {
   console.log(`Client runtime config generated: ${runtimeConfigPath}`);
   console.log(`Client static server running: http://${staticHost}:${staticPort}`);
-  console.log(`Open demo page: http://${publicHost}:${staticPort}/index.html`);
+  console.log(`Open demo page: http://${publicHost}:${staticPort}/client.html`);
 });
 
 let shuttingDown = false;

@@ -401,18 +401,11 @@ export function startStaticServer({
             requestId,
             forceReconnect: true,
           });
-          const notifyClient = enqueueAgentCommand('notify_client_action', {
-            daemonId,
-            clientId,
-            signalingServer,
-            targetUrl,
-            requestId,
-          });
 
           writeJson(res, 200, {
             ok: true,
             requestId,
-            commandIds: [setSession.id, resetConnection.id, connectOnly.id, notifyClient.id],
+            commandIds: [setSession.id, resetConnection.id, connectOnly.id],
             bootstrappedAgent: bridge.bootstrapped,
           });
         })

@@ -94,6 +94,14 @@ if (process.argv.length > 2) {
         return;
       }
       if (kind === 'status') {
+        if (event.status === 'connected') {
+          logger.info('daemon-agent signaling connected', {
+            daemonId: String(event?.state?.daemonId || ''),
+            clientId: String(event?.state?.clientId || ''),
+            signalingServer: String(event?.state?.signalingServer || ''),
+            allowedRemoteIds: Array.isArray(event?.state?.allowedRemoteIds) ? event.state.allowedRemoteIds : [],
+          });
+        }
         if (event.status === 'sharing') {
           logger.info('daemon-agent share diagnostics', {
             automated: Boolean(event?.state?.automated),
@@ -148,7 +156,7 @@ if (process.argv.length > 2) {
         return;
       }
       if (kind === 'peer_command_result') {
-        logger.info('daemon-agent peer command result', {
+        logger.debug('daemon-agent peer command result', {
           requestId: String(event?.requestId || ''),
           type: String(event?.type || ''),
           ok: event?.ok !== false,

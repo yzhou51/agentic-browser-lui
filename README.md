@@ -58,7 +58,7 @@ Node.js pnpm workspace for an agentic browser P2P system with two sub-projects:
      - Daemon-opened target: use `Open In New Tab`, then click `Check Extension`.
      - User-opened target: open the page yourself, return to daemon-agent, click `Bind Last Active Tab`, and confirm the controlled-tab indicator/status updates.
    - Click `Connect`, then click `Share Screen` and choose the same browser tab/page that will receive remote input.
-5. Open client demo URL printed by client startup (default `http://127.0.0.1:5174/index.html`).
+5. Open client demo URL printed by client startup (default `http://127.0.0.1:5174/client.html`).
 6. In client demo:
    - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`).
    - Ensure `Daemon API URL` points to daemon static server (`http://localhost:8788`).

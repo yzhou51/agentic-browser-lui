@@ -108,7 +108,10 @@ function SignalingChannel() {
     });
 
     wsServer.on('owt-message', function(data) {
-      console.info('Received owt message.');
+      console.info('Received owt message.', {
+        from: data && data.from,
+        data: data && data.data,
+      });
       if (self.onMessage) {
         self.onMessage(data.from, data.data);
       }

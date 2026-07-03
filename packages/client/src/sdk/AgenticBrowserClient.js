@@ -62,21 +62,30 @@ export class AgenticBrowserClient {
     });
 
     this.p2p.addEventListener('streamadded', async (event) => {
-      try {
-        let remoteStream = event.stream;
+      const originalStream = event.stream;
+      let remoteStream = originalStream;
 
+      console.debug('[client-sdk] streamadded received', {
+        daemonId: this.daemonId,
+        hasStream: Boolean(originalStream),
+        streamId: originalStream?.id || originalStream?.mediaStream?.id || null,
+        hasMediaStream: Boolean(originalStream?.mediaStream),
+      });
+
+      try {
         if (typeof this.p2p.subscribe === 'function') {
           const subscription = await this.p2p.subscribe(event.stream);
           if (subscription?.stream) {
             remoteStream = subscription.stream;
           }
         }
-
-        if (this.onRemoteStream) {
-          this.onRemoteStream(remoteStream);
-        }
       } catch (error) {
         console.error('[client-sdk] Failed to subscribe remote stream:', error);
+        remoteStream = originalStream;
+      }
+
+      if (this.onRemoteStream) {
+        this.onRemoteStream(remoteStream);
       }
     });
 
@@ -149,8 +158,6 @@ export class AgenticBrowserClient {
   }
 
   async sendMessage(message, targetId) {
-    await this.ensureConnected();
-
     const resolvedTarget = String(targetId || this.daemonId || '').trim();
     if (!resolvedTarget) {
       throw new Error('Target daemon id is required before sending messages.');
@@ -160,6 +167,10 @@ export class AgenticBrowserClient {
     console.debug('[client-sdk] sending command', {
       target: resolvedTarget,
       message,
+    });
+    console.info('[client-sdk] sending owt message', {
+      target: resolvedTarget,
+      payload,
     });
     try {
       await this.p2p.send(resolvedTarget, payload);

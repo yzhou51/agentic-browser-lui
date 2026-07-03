@@ -1,6 +1,7 @@
 /* global Owt */
 
 import { createExtensionBridge } from '/daemon-src/extensionBridge.browser.js';
+import { createDaemonP2PClient } from '/daemon-src/p2pClient.browser.js';
 import { createTargetTabCommandForwarder } from '/daemon-src/targetTabForwarding.browser.js';
 
 async function loadRuntimeConfig() {
@@ -40,12 +41,11 @@ async function loadRuntimeConfig() {
   remoteInput.value = params.get('remote') || runtimeConfig.clientId || remoteInput.value;
   hostInput.value = params.get('host') || runtimeConfig.signalingServer || hostInput.value;
 
-  let p2p = null;
-  let p2pConnected = false;
   let screenStream = null;
   let targetTabWindow = null;
   let extensionManagedTarget = null;
   let controlTargetMode = null;
+  let extensionFallbackDisabledForPeerFlow = false;
   let agentCommandCursor = 0;
   let pollingAgentCommands = false;
 
@@ -138,6 +138,19 @@ async function loadRuntimeConfig() {
 
   function shouldUseExtensionManagedTarget() {
     return controlTargetMode === 'extension' && Boolean(extensionManagedTarget);
+  }
+
+  function canUseExtensionFallback() {
+    return !extensionFallbackDisabledForPeerFlow;
+  }
+
+  function buildPuppeteerOnlyFailure(command, error) {
+    const type = String(command?.type || 'unknown');
+    return {
+      ok: false,
+      bridge: 'puppeteer',
+      error: `Puppeteer ${type} failed and extension fallback is disabled: ${error?.message || 'unknown error'}`,
+    };
   }
 
   const extensionBridge = createExtensionBridge({
@@ -361,6 +374,13 @@ async function loadRuntimeConfig() {
   }
 
   async function refreshExtensionStatus() {
+    if (!canUseExtensionFallback()) {
+      if (controlTargetMode === 'puppeteer') {
+        setExtensionStatus('disabled for peer flow (Puppeteer-only mode)');
+      }
+      return;
+    }
+
     try {
       const status = await getExtensionManagedStatus();
       if (!status?.ok) {
@@ -401,6 +421,10 @@ async function loadRuntimeConfig() {
 
   function looksLikeCorrectSharedTarget(sharedTrackLabel) {
     if (!sharedTrackLabel) {
+      return true;
+    }
+
+    if (controlTargetMode === 'puppeteer') {
       return true;
     }
 
@@ -446,200 +470,20 @@ async function loadRuntimeConfig() {
     return result;
   }
 
-
-  async function handleCommand(command) {
-    const { type, payload = {} } = command;
-    console.log('[daemon-agent] handleCommand received', {
-      type,
-      payload,
-      requestId: command?.requestId,
-    });
-
-    switch (type) {
-      case 'open_url':
-        try {
-          return await forwardCommandViaPuppeteer(command);
-        } catch (error) {
-          console.log('[daemon-agent] puppeteer open_url path failed, falling back', { error: error.message });
-        }
-        if (shouldUseExtensionManagedTarget()) {
-          return forwardCommandViaExtension(command);
-        }
-        if (shouldUseDirectTarget()) {
-          console.debug('[daemon-agent] handleCommand route to target tab', { type });
-          return forwardCommandToOpenTarget(command);
-        }
-        return forwardCommandViaExtension(command);
-      case 'close_page':
-        try {
-          return await forwardCommandViaPuppeteer(command);
-        } catch (error) {
-          console.log('[daemon-agent] puppeteer close_page path failed, falling back', { error: error.message });
-        }
-        if (shouldUseExtensionManagedTarget()) {
-          return forwardCommandViaExtension(command);
-        }
-        if (shouldUseDirectTarget()) {
-          console.debug('[daemon-agent] handleCommand route to target tab', { type });
-          return forwardCommandToOpenTarget(command);
-        }
-        return forwardCommandViaExtension(command);
-      case 'mouse_move':
-        console.debug('[daemon-agent] handleCommand mouse_move', { payload });
-        try {
-          return await forwardCommandViaPuppeteer(command);
-        } catch (error) {
-          console.log('[daemon-agent] puppeteer mouse_move path failed, falling back', { error: error.message });
-        }
-        if (shouldUseExtensionManagedTarget()) {
-          return forwardCommandViaExtension(command);
-        }
-        if (shouldUseDirectTarget()) {
-          console.debug('[daemon-agent] handleCommand mouse_move -> target tab');
-          return forwardCommandToOpenTarget(command);
-        }
-        return forwardCommandViaExtension(command);
-      case 'mouse_down':
-        console.debug('[daemon-agent] handleCommand mouse_down', { payload });
-        try {
-          return await forwardCommandViaPuppeteer(command);
-        } catch (error) {
-          console.log('[daemon-agent] puppeteer mouse_down path failed, falling back', { error: error.message });
-        }
-        if (shouldUseExtensionManagedTarget()) {
-          return forwardCommandViaExtension(command);
-        }
-        if (shouldUseDirectTarget()) {
-          console.debug('[daemon-agent] handleCommand mouse_down -> target tab');
-          return forwardCommandToOpenTarget(command);
-        }
-        return forwardCommandViaExtension(command);
-      case 'mouse_up':
-        console.debug('[daemon-agent] handleCommand mouse_up', { payload });
-        try {
-          return await forwardCommandViaPuppeteer(command);
-        } catch (error) {
-          console.log('[daemon-agent] puppeteer mouse_up path failed, falling back', { error: error.message });
-        }
-        if (shouldUseExtensionManagedTarget()) {
-          return forwardCommandViaExtension(command);
-        }
-        if (shouldUseDirectTarget()) {
-          console.debug('[daemon-agent] handleCommand mouse_up -> target tab');
-          return forwardCommandToOpenTarget(command);
-        }
-        return forwardCommandViaExtension(command);
-      case 'mouse_click':
-        console.debug('[daemon-agent] handleCommand mouse_click', { payload });
-        try {
-          return await forwardCommandViaPuppeteer(command);
-        } catch (error) {
-          console.log('[daemon-agent] puppeteer mouse_click path failed, falling back', { error: error.message });
-        }
-        if (shouldUseExtensionManagedTarget()) {
-          return forwardCommandViaExtension(command);
-        }
-        if (shouldUseDirectTarget()) {
-          console.debug('[daemon-agent] handleCommand mouse_click -> target tab');
-          return forwardCommandToOpenTarget(command);
-        }
-        return forwardCommandViaExtension(command);
-      case 'text_input':
-        console.debug('[daemon-agent] handleCommand text_input', { payload });
-        try {
-          return await forwardCommandViaPuppeteer(command);
-        } catch (error) {
-          console.log('[daemon-agent] puppeteer text_input path failed, falling back', { error: error.message });
-        }
-        if (shouldUseExtensionManagedTarget()) {
-          return forwardCommandViaExtension(command);
-        }
-        if (shouldUseDirectTarget()) {
-          console.debug('[daemon-agent] handleCommand text_input -> target tab');
-          return forwardCommandToOpenTarget(command);
-        }
-        return forwardCommandViaExtension(command);
-      case 'key_press':
-        console.debug('[daemon-agent] handleCommand key_press', { payload });
-        try {
-          return await forwardCommandViaPuppeteer(command);
-        } catch (error) {
-          console.log('[daemon-agent] puppeteer key_press path failed, falling back', { error: error.message });
-        }
-        if (shouldUseExtensionManagedTarget()) {
-          return forwardCommandViaExtension(command);
-        }
-        if (shouldUseDirectTarget()) {
-          console.debug('[daemon-agent] handleCommand key_press -> target tab');
-          return forwardCommandToOpenTarget(command);
-        }
-        return forwardCommandViaExtension(command);
-      case 'extension_ping':
-        try {
-          return await forwardCommandViaPuppeteer(command);
-        } catch (error) {
-          console.log('[daemon-agent] puppeteer extension_ping path failed, falling back', { error: error.message });
-        }
-        if (shouldUseExtensionManagedTarget()) {
-          return checkExtensionManagedTarget();
-        }
-        if (shouldUseDirectTarget()) {
-          return forwardCommandToOpenTarget(command);
-        }
-        return checkExtensionManagedTarget();
-      case 'launch_chrome':
-      case 'exit_chrome':
-        return { ok: false, error: `${type} is not used in daemon-agent embedded-target demo.` };
-      default:
-        return { ok: false, error: `Unsupported command type: ${type}` };
-    }
-  }
-
-  async function connect() {
-    const daemonId = uidInput.value.trim();
-    const remoteId = remoteInput.value.trim();
-    const signalingHost = hostInput.value.trim();
-
-    console.debug('[daemon-agent] connect() called', { daemonId, remoteId, signalingHost });
-    appendMessage(`connect requested: daemon=${daemonId} client=${remoteId} signaling=${signalingHost}`);
-    console.log('[daemon-agent] connect requested', { daemonId, remoteId, signalingHost });
-
-    if (!daemonId) {
-      throw new Error('Daemon ID is required.');
-    }
-    if (!remoteId) {
-      throw new Error('Client ID is required.');
-    }
-    if (!signalingHost) {
-      throw new Error('Signaling host is required.');
-    }
-
-    if (p2p) {
-      p2p.disconnect();
-      p2p = null;
-    }
-    p2pConnected = false;
-
-    const signaling = new window.SignalingChannel();
-    p2p = new Owt.P2P.P2PClient({ rtcConfiguration: {} }, signaling);
-    p2p.allowedRemoteIds = [remoteId];
-
-    console.debug('[daemon-agent] connecting', {
-      daemonId,
-      remoteId,
-      signalingHost,
-      allowedRemoteIds: p2p.allowedRemoteIds,
-    });
-
-    p2p.addEventListener('serverdisconnected', () => {
-      console.log('[daemon-agent] signaling server disconnected', { daemonId, remoteId, signalingHost });
-      p2pConnected = false;
+  const p2pClient = createDaemonP2PClient({
+    windowObject: window,
+    getSessionConfig: () => ({
+      daemonId: uidInput.value.trim(),
+      clientId: remoteInput.value.trim(),
+      signalingServer: hostInput.value.trim(),
+    }),
+    onServerDisconnected: ({ daemonId, clientId, signalingServer }) => {
+      console.log('[daemon-agent] signaling server disconnected', { daemonId, remoteId: clientId, signalingHost: signalingServer });
       setStatus('Disconnected from signaling server.');
       appendMessage('signaling server disconnected');
-    });
-
-    p2p.addEventListener('messagereceived', async (e) => {
-      console.debug('[daemon-agent] message received', {
+    },
+    onMessage: async (e) => {
+      console.log('[daemon-agent] message received', {
         origin: e.origin,
         message: e.message,
       });
@@ -661,8 +505,13 @@ async function loadRuntimeConfig() {
           });
           appendMessage(`resolve received from ${e.origin} (${command.requestId || 'n/a'})`);
 
+          extensionFallbackDisabledForPeerFlow = true;
+          controlTargetMode = 'puppeteer';
+          extensionManagedTarget = null;
+          setExtensionStatus('disabled for peer flow (Puppeteer-only mode)');
+
           try {
-            await ensureConnected();
+            await p2pClient.ensureConnected();
 
             try {
               window.focus();
@@ -691,16 +540,17 @@ async function loadRuntimeConfig() {
               throw new Error('share failed or was cancelled by user.');
             }
 
-            await p2p.send(
+            await p2pClient.sendPeerMessage(
               e.origin,
-              JSON.stringify({
+              {
                 type: 'resolve_result',
                 requestId: command.requestId,
                 ok: true,
                 result: {
                   message: 'resolve accepted; sharing started',
                 },
-              })
+              },
+              { label: 'resolve_result success' }
             );
 
             postAgentEvent({
@@ -719,14 +569,15 @@ async function loadRuntimeConfig() {
             });
             appendMessage(`resolve failed: ${resolveError.message}`);
 
-            await p2p.send(
+            await p2pClient.sendPeerMessage(
               e.origin,
-              JSON.stringify({
+              {
                 type: 'resolve_result',
                 requestId: command.requestId,
                 ok: false,
                 error: resolveError.message,
-              })
+              },
+              { label: 'resolve_result failure' }
             );
 
             postAgentEvent({
@@ -761,14 +612,15 @@ async function loadRuntimeConfig() {
           `[daemon-agent] command summary requestId=${command.requestId || 'n/a'} type=${command.type || 'unknown'} ok=${body?.ok !== false} ` +
           `message=${body?.message || ''} error=${body?.error || ''} bridge=${body?.bridge || ''}`
         );
-        await p2p.send(
+        await p2pClient.sendPeerMessage(
           e.origin,
-          JSON.stringify({
+          {
             type: 'command_result',
             requestId: command.requestId,
             ok: body.ok !== false,
             result: body,
-          })
+          },
+          { label: 'command_result' }
         );
       } catch (error) {
         appendMessage(`command error: ${error.message}`);
@@ -778,45 +630,99 @@ async function loadRuntimeConfig() {
           error: error.message,
         }).catch(() => {});
         try {
-          await p2p.send(
+          await p2pClient.sendPeerMessage(
             e.origin,
-            JSON.stringify({
+            {
               type: 'command_result',
               ok: false,
               error: error.message,
-            })
+            },
+            { label: 'command_result error fallback' }
           );
         } catch {
           // Ignore secondary send failures.
         }
       }
+    },
+    onConnected: async ({ daemonId, clientId, signalingServer, allowedRemoteIds }) => {
+      uidInput.disabled = true;
+      console.log('[daemon-agent] connected to signaling server', { daemonId, remoteId: clientId, signalingHost: signalingServer, allowedRemoteIds });
+      appendMessage(`connected to signaling: daemon=${daemonId} client=${clientId}`);
+      setStatus(`Connected as ${daemonId}. Waiting for ${clientId} messages.`);
+      await postAgentEvent({
+        kind: 'status',
+        status: 'connected',
+        state: {
+          daemonId,
+          clientId,
+          signalingServer,
+          allowedRemoteIds,
+        },
+      });
+    },
+    onReconnectNeeded: ({ connectedSession, desired, allowedRemoteIds }) => {
+      console.log('[daemon-agent] ensureConnected detected stale/mismatched session, reconnecting', {
+        connectedSession,
+        desired,
+        allowedRemoteIds,
+      });
+      appendMessage('ensureConnected: stale signaling session detected, reconnecting.');
+    },
+    onRetrySend: ({ label, errorMessage }) => {
+      appendMessage(`[data-channel] retrying ${label} after signaling reconnect: ${errorMessage}`);
+    },
+  });
+
+
+  async function handleCommand(command) {
+    const { type, payload = {} } = command;
+    console.log('[daemon-agent] handleCommand received', {
+      type,
+      payload,
+      requestId: command?.requestId,
     });
 
-    await p2p.connect({ host: signalingHost, token: daemonId });
-    p2pConnected = true;
-    uidInput.disabled = true;
-    console.log('[daemon-agent] connected to signaling server', { daemonId, remoteId, signalingHost });
-    appendMessage(`connected to signaling: daemon=${daemonId} client=${remoteId}`);
-    setStatus(`Connected as ${daemonId}. Waiting for ${remoteId} messages.`);
-    await postAgentEvent({
-      kind: 'status',
-      status: 'connected',
-      state: {
-        daemonId,
-        clientId: remoteId,
-        signalingServer: signalingHost,
-      },
-    });
+    switch (type) {
+      case 'open_url':
+      case 'close_page':
+      case 'mouse_move':
+      case 'mouse_down':
+      case 'mouse_up':
+      case 'mouse_click':
+      case 'text_input':
+      case 'key_press':
+      case 'extension_ping':
+        if (type !== 'open_url' && type !== 'close_page' && type !== 'extension_ping') {
+          console.debug(`[daemon-agent] handleCommand ${type}`, { payload });
+        }
+        try {
+          return await forwardCommandViaPuppeteer(command);
+        } catch (error) {
+          console.log(`[daemon-agent] puppeteer ${type} failed`, { error: error.message });
+          return buildPuppeteerOnlyFailure(command, error);
+        }
+      case 'launch_chrome':
+      case 'exit_chrome':
+        return { ok: false, error: `${type} is not used in daemon-agent embedded-target demo.` };
+      default:
+        return { ok: false, error: `Unsupported command type: ${type}` };
+    }
+  }
 
-    return p2p;
+  async function connect() {
+    const daemonId = uidInput.value.trim();
+    const remoteId = remoteInput.value.trim();
+    const signalingHost = hostInput.value.trim();
+
+    console.log('[daemon-agent] connect() called', { daemonId, remoteId, signalingHost });
+    appendMessage(`connect requested: daemon=${daemonId} client=${remoteId} signaling=${signalingHost}`);
+    console.log('[daemon-agent] connect requested', { daemonId, remoteId, signalingHost });
+
+    return p2pClient.connect();
   }
 
   async function ensureConnected() {
-    if (p2p && p2pConnected) {
-      return p2p;
-    }
-
-    return connect();
+    return p2pClient.ensureConnected();
   }
 
   async function shareScreen({ automated = false } = {}) {
@@ -825,7 +731,7 @@ async function loadRuntimeConfig() {
       controlTargetMode,
       targetUrl: targetUrlInput?.value || '',
     });
-    if (!p2p) {
+    if (!p2pClient.getClient()) {
       setStatus('Connect first.');
       return;
     }
@@ -894,8 +800,9 @@ async function loadRuntimeConfig() {
       controlTargetMode,
     });
     if (!looksLikeCorrectSharedTarget(sharedTrackLabel)) {
+      const expectedTarget = extensionManagedTarget ? formatTargetDescriptor(extensionManagedTarget) : targetUrlInput.value || 'unknown target';
       setStatus(
-        `Share warning: selected stream looks like "${sharedTrackLabel}" but controlled tab is ${formatTargetDescriptor(extensionManagedTarget)}`
+        `Share warning: selected stream looks like "${sharedTrackLabel}" but controlled tab is ${expectedTarget}`
       );
     }
 
@@ -903,7 +810,38 @@ async function loadRuntimeConfig() {
       mediaStream,
       new Owt.Base.StreamSourceInfo('screen-cast', 'screen-cast')
     );
-    await p2p.publish(remoteInput.value.trim(), screenStream);
+    const p2p = p2pClient.getClient();
+    const publishTargetId = remoteInput.value.trim();
+    const trackSummary = mediaStream.getTracks().map((track) => ({
+      id: track.id,
+      kind: track.kind,
+      label: track.label,
+      readyState: track.readyState,
+      muted: track.muted,
+    }));
+
+    console.log('[daemon-agent] publishing screen stream', {
+      publishTargetId,
+      allowedRemoteIds: p2pClient.getAllowedRemoteIds(),
+      mediaStreamId: mediaStream.id,
+      trackSummary,
+    });
+    appendMessage(`publishing screen stream to ${publishTargetId}: ${JSON.stringify(trackSummary)}`);
+
+    const publishTimeoutMs = 8000;
+    await Promise.race([
+      p2p.publish(publishTargetId, screenStream),
+      new Promise((_, reject) => {
+        window.setTimeout(() => {
+          reject(new Error(`Timed out after ${publishTimeoutMs}ms waiting for remote peer to acknowledge published tracks.`));
+        }, publishTimeoutMs);
+      }),
+    ]);
+    console.log('[daemon-agent] screen stream publish acknowledged', {
+      publishTargetId,
+      mediaStreamId: mediaStream.id,
+    });
+    appendMessage(`screen stream publish acknowledged by ${publishTargetId}`);
 
     if (targetTabWindow && !targetTabWindow.closed && targetTabWindow !== window) {
       try {
@@ -955,11 +893,7 @@ async function loadRuntimeConfig() {
       screenStream = null;
     }
 
-    if (p2p) {
-      p2p.disconnect();
-      p2p = null;
-    }
-    p2pConnected = false;
+    await p2pClient.disconnect();
     uidInput.disabled = false;
     controlTargetMode = null;
     updateTargetIndicatorFromState({});
@@ -973,7 +907,7 @@ async function loadRuntimeConfig() {
   async function executeAgentCommand(command) {
     const type = String(command?.type || '');
     const payload = command?.payload || {};
-
+    console.log('[daemon-agent] executeAgentCommand', { type, payload, commandId: command?.id });
     switch (type) {
       case 'set_session': {
         if (typeof payload.daemonId === 'string' && payload.daemonId.trim()) {
@@ -1057,30 +991,6 @@ async function loadRuntimeConfig() {
         appendMessage(`CONNECT_ONLY_CONNECTED daemon=${uidInput.value.trim()} client=${remoteInput.value.trim()} signaling=${hostInput.value.trim()}`);
 
         return { ok: true, message: 'connected to signaling and waiting for resolve' };
-      }
-      case 'notify_client_action': {
-        await ensureConnected();
-
-        const targetClientId = String(payload.clientId || remoteInput.value || '').trim();
-        if (!targetClientId) {
-          return { ok: false, error: 'clientId is required to notify client.' };
-        }
-
-        await p2p.send(
-          targetClientId,
-          JSON.stringify({
-            type: 'action_request',
-            requestId: payload.requestId || `action-${Date.now()}`,
-            payload: {
-              daemonId: String(payload.daemonId || uidInput.value || '').trim(),
-              clientId: targetClientId,
-              signalingServer: String(payload.signalingServer || hostInput.value || '').trim(),
-              targetUrl: String(payload.targetUrl || targetUrlInput.value || '').trim(),
-            },
-          })
-        );
-
-        return { ok: true, message: `action request notification sent to ${targetClientId}` };
       }
       case 'disconnect': {
         await disconnect();
@@ -1203,7 +1113,7 @@ async function loadRuntimeConfig() {
         daemonId: uidInput.value.trim(),
         clientId: remoteInput.value.trim(),
         signalingServer: hostInput.value.trim(),
-        connected: Boolean(p2p),
+        connected: p2pClient.isConnected(),
         sharing: Boolean(screenStream),
         controlTargetMode,
       },

@@ -38,6 +38,15 @@ export class CommandProcessor {
             bridge: 'puppeteer',
           };
         }
+        case 'prepare_share_target': {
+          const result = await this.browser.prepareShareTarget();
+          return {
+            ok: true,
+            message: result ? 'Prepared target page for sharing.' : 'No Puppeteer target page is open to prepare.',
+            targetPage: result,
+            bridge: 'puppeteer',
+          };
+        }
         case 'close_target_page': {
           await this.browser.closeTargetPage();
           return { ok: true, message: 'Target page closed.', bridge: 'puppeteer' };
