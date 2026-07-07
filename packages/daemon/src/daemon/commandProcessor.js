@@ -53,18 +53,26 @@ export class CommandProcessor {
         }
         case 'dispatch_target_command':
           return await this.browser.dispatchTargetCommand(payload.command || {});
-        case 'mouse_move':
-          await this.browser.moveMouse(payload.x, payload.y);
-          return { ok: true };
-        case 'mouse_down':
-          await this.browser.mouseDown(payload.x, payload.y, payload.button || 'left');
-          return { ok: true };
-        case 'mouse_up':
-          await this.browser.mouseUp(payload.x, payload.y, payload.button || 'left');
-          return { ok: true };
-        case 'mouse_click':
-          await this.browser.clickMouse(payload.x, payload.y, payload.button || 'left');
-          return { ok: true };
+        case 'mouse_move': {
+          const mapped = await this.browser.resolveTargetCoordinates(payload);
+          await this.browser.moveMouse(mapped.x, mapped.y);
+          return { ok: true, mapped };
+        }
+        case 'mouse_down': {
+          const mapped = await this.browser.resolveTargetCoordinates(payload);
+          await this.browser.mouseDown(mapped.x, mapped.y, payload.button || 'left');
+          return { ok: true, mapped };
+        }
+        case 'mouse_up': {
+          const mapped = await this.browser.resolveTargetCoordinates(payload);
+          await this.browser.mouseUp(mapped.x, mapped.y, payload.button || 'left');
+          return { ok: true, mapped };
+        }
+        case 'mouse_click': {
+          const mapped = await this.browser.resolveTargetCoordinates(payload);
+          await this.browser.clickMouse(mapped.x, mapped.y, payload.button || 'left');
+          return { ok: true, mapped };
+        }
         case 'text_input':
           await this.browser.inputText(payload.text || '');
           return { ok: true };

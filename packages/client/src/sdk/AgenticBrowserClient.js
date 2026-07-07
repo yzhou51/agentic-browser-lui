@@ -6,6 +6,7 @@ export class AgenticBrowserClient {
     this.daemonId = null;
     this.onRemoteStream = null;
     this.onMessage = null;
+    this.onDataChannelOpen = null;
     this.onDisconnect = null;
     this._requestSeq = 0;
     this._connectOptions = null;
@@ -52,6 +53,20 @@ export class AgenticBrowserClient {
     this.p2p = new Owt.P2P.P2PClient({ rtcConfiguration: {} }, this.signaling);
     if (this.daemonId) {
       this.p2p.allowedRemoteIds = [this.daemonId];
+    }
+
+    const originalDataChannelOpen = this.p2p._onDataChannelOpen?.bind(this.p2p);
+    if (originalDataChannelOpen) {
+      this.p2p._onDataChannelOpen = (event) => {
+        originalDataChannelOpen(event);
+        if (this.onDataChannelOpen) {
+          this.onDataChannelOpen({
+            label: event?.target?.label || null,
+            readyState: event?.target?.readyState || null,
+            event,
+          });
+        }
+      };
     }
 
     console.debug('[client-sdk] connecting', {

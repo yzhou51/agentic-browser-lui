@@ -40,7 +40,7 @@ function isDaemonAgentUrl(url = '') {
   return /\/daemon-agent\.html(?:[?#]|$)/i.test(String(url || ''));
 }
 
-function mapRemoteCoordinates(payload = {}, { targetWidth = 1, targetHeight = 1 } = {}) {
+function mapRemoteCoordinatesLegacy(payload = {}, { targetWidth = 1, targetHeight = 1 } = {}) {
   const sourceWidth = Math.max(1, Number(payload.sourceWidth || targetWidth || 1));
   const sourceHeight = Math.max(1, Number(payload.sourceHeight || targetHeight || 1));
   const resolvedTargetWidth = Math.max(1, Number(targetWidth || 1));
@@ -52,6 +52,16 @@ function mapRemoteCoordinates(payload = {}, { targetWidth = 1, targetHeight = 1 
     x: Math.max(0, Math.min(resolvedTargetWidth - 1, Math.round((x / sourceWidth) * resolvedTargetWidth))),
     y: Math.max(0, Math.min(resolvedTargetHeight - 1, Math.round((y / sourceHeight) * resolvedTargetHeight))),
   };
+}
+
+function mapRemoteCoordinates(payload = {}, { targetWidth = 1, targetHeight = 1 } = {}) {
+  const resolvedTargetWidth = Math.max(1, Number(targetWidth || 1));
+  const resolvedTargetHeight = Math.max(1, Number(targetHeight || 1));
+
+  return mapRemoteCoordinatesLegacy(payload, {
+    targetWidth: resolvedTargetWidth,
+    targetHeight: resolvedTargetHeight,
+  });
 }
 
 export class BrowserController {
@@ -306,10 +316,38 @@ export class BrowserController {
       height: window.innerHeight || document.documentElement.clientHeight || 1,
     }));
 
-    return mapRemoteCoordinates(payload, {
+    const viewportContext = {
       targetWidth: viewport.width,
       targetHeight: viewport.height,
-    });
+    };
+    const mapped = mapRemoteCoordinates(payload, viewportContext);
+    const hasViewportMapping =
+      Number.isFinite(Number(payload.viewWidth)) && Number(payload.viewWidth) > 0 &&
+      Number.isFinite(Number(payload.viewHeight)) && Number(payload.viewHeight) > 0;
+
+    if (hasViewportMapping) {
+      const legacyMapped = mapRemoteCoordinatesLegacy(payload, viewportContext);
+      logger.debug('resolveTargetCoordinates mapping comparison', {
+        source: {
+          x: Number(payload.x || 0),
+          y: Number(payload.y || 0),
+        },
+        viewport: {
+          viewScrollLeft: Number(payload.viewScrollLeft || 0),
+          viewScrollTop: Number(payload.viewScrollTop || 0),
+          viewWidth: Number(payload.viewWidth || 0),
+          viewHeight: Number(payload.viewHeight || 0),
+        },
+        mappedViewportAware: mapped,
+        mappedLegacy: legacyMapped,
+        delta: {
+          dx: mapped.x - legacyMapped.x,
+          dy: mapped.y - legacyMapped.y,
+        },
+      });
+    }
+
+    return mapped;
   }
 
   async prepareTargetPage() {

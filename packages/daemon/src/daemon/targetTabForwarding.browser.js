@@ -18,6 +18,22 @@ function getMouseButtonCode(button = 'left') {
   return 0;
 }
 
+function mapRemoteCoordinatesLegacy(payload = {}, { sourceWidth = 1, sourceHeight = 1, targetWidth = 1, targetHeight = 1 } = {}) {
+  const resolvedSourceWidth = Math.max(1, Number(payload.sourceWidth || sourceWidth || 1));
+  const resolvedSourceHeight = Math.max(1, Number(payload.sourceHeight || sourceHeight || 1));
+  const resolvedTargetWidth = Math.max(1, Number(targetWidth || 1));
+  const resolvedTargetHeight = Math.max(1, Number(targetHeight || 1));
+  const x = Number(payload.x || 0);
+  const y = Number(payload.y || 0);
+
+  return {
+    x: Math.max(0, Math.min(resolvedTargetWidth - 1, Math.round((x / resolvedSourceWidth) * resolvedTargetWidth))),
+    y: Math.max(0, Math.min(resolvedTargetHeight - 1, Math.round((y / resolvedSourceHeight) * resolvedTargetHeight))),
+    targetWidth: resolvedTargetWidth,
+    targetHeight: resolvedTargetHeight,
+  };
+}
+
 export function mapRemoteCoordinates(payload = {}, { sourceWidth = 1, sourceHeight = 1, targetWidth = 1, targetHeight = 1 } = {}) {
   const resolvedSourceWidth = Number(payload.sourceWidth || sourceWidth || 1);
   const resolvedSourceHeight = Number(payload.sourceHeight || sourceHeight || 1);
@@ -26,15 +42,12 @@ export function mapRemoteCoordinates(payload = {}, { sourceWidth = 1, sourceHeig
   const x = Number(payload.x || 0);
   const y = Number(payload.y || 0);
 
-  const mappedX = Math.max(0, Math.min(resolvedTargetWidth - 1, Math.round((x / resolvedSourceWidth) * resolvedTargetWidth)));
-  const mappedY = Math.max(0, Math.min(resolvedTargetHeight - 1, Math.round((y / resolvedSourceHeight) * resolvedTargetHeight)));
-
-  return {
-    x: mappedX,
-    y: mappedY,
+  return mapRemoteCoordinatesLegacy(payload, {
+    sourceWidth: resolvedSourceWidth,
+    sourceHeight: resolvedSourceHeight,
     targetWidth: resolvedTargetWidth,
     targetHeight: resolvedTargetHeight,
-  };
+  });
 }
 
 export function canAccessWindowDom(targetWindow) {
@@ -316,12 +329,46 @@ export function createTargetTabCommandForwarder({
 
       if (type === 'mouse_move' || type === 'mouse_down' || type === 'mouse_up' || type === 'mouse_click') {
         const fallbackViewport = getFallbackViewport();
-        const mapped = mapRemoteCoordinates(payload, {
+        const viewportContext = {
           sourceWidth: fallbackViewport.width,
           sourceHeight: fallbackViewport.height,
           targetWidth: targetWindow.innerWidth || fallbackViewport.width || 1,
           targetHeight: targetWindow.innerHeight || fallbackViewport.height || 1,
+        };
+        const mapped = mapRemoteCoordinates(payload, {
+          sourceWidth: viewportContext.sourceWidth,
+          sourceHeight: viewportContext.sourceHeight,
+          targetWidth: viewportContext.targetWidth,
+          targetHeight: viewportContext.targetHeight,
         });
+
+        const hasViewportMapping =
+          Number.isFinite(Number(payload.viewWidth)) && Number(payload.viewWidth) > 0 &&
+          Number.isFinite(Number(payload.viewHeight)) && Number(payload.viewHeight) > 0;
+
+        if (hasViewportMapping) {
+          const legacyMapped = mapRemoteCoordinatesLegacy(payload, viewportContext);
+          logger.debug('[daemon-agent] coordinate mapping comparison', {
+            type,
+            source: {
+              x: Number(payload.x || 0),
+              y: Number(payload.y || 0),
+            },
+            viewport: {
+              viewScrollLeft: Number(payload.viewScrollLeft || 0),
+              viewScrollTop: Number(payload.viewScrollTop || 0),
+              viewWidth: Number(payload.viewWidth || 0),
+              viewHeight: Number(payload.viewHeight || 0),
+            },
+            mappedViewportAware: mapped,
+            mappedLegacy: legacyMapped,
+            delta: {
+              dx: mapped.x - legacyMapped.x,
+              dy: mapped.y - legacyMapped.y,
+            },
+          });
+        }
+
         logger.debug('[daemon-agent] forwardCommandToTargetTab mouse coords mapped', {
           type,
           payload,

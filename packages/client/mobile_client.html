@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Agentic Browser Mobile Client</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <style>
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+      }
+
+      .mobile-app {
+        display: grid;
+        gap: 8px;
+        padding: 8px;
+        height: 100dvh;
+        overflow: hidden;
+        grid-template-rows: minmax(0, 1fr);
+      }
+
+      .mobile-app > .panel {
+        min-height: 0;
+        min-width: 0;
+        padding: 12px;
+      }
+
+      .mobile-remote-panel {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        min-width: 0;
+      }
+
+      .mobile-remote-panel.show-h-scroll .mobile-h-scroll {
+        opacity: 1;
+        transform: translateY(0);
+        pointer-events: auto;
+      }
+
+      .mobile-remote-panel.show-v-scroll .mobile-v-scroll {
+        opacity: 1;
+        transform: translateX(0);
+        pointer-events: auto;
+      }
+
+      .mobile-remote-panel.fit-mode .mobile-h-scroll {
+        display: none;
+      }
+
+      .mobile-remote-panel.fit-mode .mobile-v-scroll {
+        display: none;
+      }
+
+      .mobile-status-chip {
+        position: relative;
+        z-index: 1;
+        margin: 0 0 10px;
+        padding: 8px 10px;
+        max-width: 100%;
+        backdrop-filter: blur(8px);
+        background: rgba(5, 9, 19, 0.72);
+      }
+
+      .mobile-video {
+        display: block;
+        width: 100%;
+        height: 100%;
+        max-width: none;
+        flex: 0 0 auto;
+        border-radius: 12px;
+        border: 1px solid #22324d;
+        background: #02040a;
+        object-fit: contain;
+        touch-action: none;
+      }
+
+      #remoteVideo.mobile-video {
+        width: 100%;
+        height: auto;
+        min-height: 0;
+        aspect-ratio: auto;
+      }
+
+      .mobile-video-scroll {
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        min-width: 0;
+        overflow: auto;
+        -webkit-overflow-scrolling: auto;
+        scrollbar-gutter: stable both-edges;
+        overscroll-behavior: none;
+        touch-action: none;
+        display: flex;
+        align-items: flex-start;
+        justify-content: flex-start;
+        border-radius: 12px;
+        border: 1px solid #22324d;
+        background: #02040a;
+        scrollbar-width: auto;
+        scrollbar-color: #f59e0b #0b1224;
+      }
+
+      .mobile-video-scroll::-webkit-scrollbar {
+        height: 14px;
+        width: 14px;
+      }
+
+      .mobile-video-scroll::-webkit-scrollbar-track {
+        background: #0b1224;
+        border-radius: 999px;
+      }
+
+      .mobile-video-scroll::-webkit-scrollbar-thumb {
+        background: #f59e0b;
+        border-radius: 999px;
+      }
+
+      .mobile-h-scroll {
+        position: absolute;
+        left: 16px;
+        right: 16px;
+        bottom: 12px;
+        height: 24px;
+        border-radius: 999px;
+        background: rgba(11, 18, 36, 0.86);
+        border: 1px solid rgba(245, 158, 11, 0.38);
+        z-index: 3;
+        opacity: 0;
+        transform: translateY(6px);
+        pointer-events: none;
+        transition: opacity 160ms ease, transform 160ms ease;
+      }
+
+      .mobile-h-scroll.is-disabled {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .mobile-v-scroll {
+        position: absolute;
+        top: 16px;
+        right: 12px;
+        bottom: 16px;
+        width: 24px;
+        border-radius: 999px;
+        background: rgba(11, 18, 36, 0.86);
+        border: 1px solid rgba(245, 158, 11, 0.38);
+        z-index: 3;
+        opacity: 0;
+        transform: translateX(6px);
+        pointer-events: none;
+        transition: opacity 160ms ease, transform 160ms ease;
+      }
+
+      .mobile-v-scroll.is-disabled {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .mobile-v-scroll-thumb {
+        position: absolute;
+        top: 0;
+        left: 3px;
+        width: 16px;
+        height: 56px;
+        border-radius: 999px;
+        background: linear-gradient(180deg, #fcd34d, #f59e0b);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+      }
+
+      .mobile-h-scroll-thumb {
+        position: absolute;
+        top: 3px;
+        left: 0;
+        height: 16px;
+        width: 56px;
+        border-radius: 999px;
+        background: linear-gradient(180deg, #fcd34d, #f59e0b);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+      }
+
+      .keyboard-fab {
+        position: absolute;
+        right: 16px;
+        bottom: 16px;
+        z-index: 2;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        min-width: 56px;
+        min-height: 56px;
+        padding: 0 16px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        background: linear-gradient(180deg, #fcd34d, var(--accent));
+        box-shadow: 0 16px 28px rgba(0, 0, 0, 0.28);
+        color: #1f1400;
+        touch-action: none;
+        user-select: none;
+        cursor: grab;
+      }
+
+      .keyboard-fab.is-dragging {
+        cursor: grabbing;
+      }
+
+      .keyboard-fab svg {
+        width: 22px;
+        height: 22px;
+        flex: 0 0 auto;
+      }
+
+      .keyboard-fab span {
+        font-weight: 700;
+      }
+
+      .mobile-hidden-keyboard {
+        position: fixed;
+        left: -9999px;
+        top: 0;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+      }
+
+      .mobile-hint {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      @media (min-width: 768px) {
+        .mobile-app {
+          max-width: 900px;
+          margin: 0 auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="mobile-app">
+      <section class="panel mobile-remote-panel">
+        <p id="status" class="status mobile-status-chip" data-state="connecting" aria-live="polite">Booting...</p>
+        <div class="mobile-video-scroll">
+          <video id="remoteVideo" class="mobile-video" autoplay playsinline muted tabindex="0"></video>
+        </div>
+        <div id="hScrollOverlay" class="mobile-h-scroll" aria-hidden="true">
+          <div id="hScrollThumb" class="mobile-h-scroll-thumb"></div>
+        </div>
+        <div id="vScrollOverlay" class="mobile-v-scroll" aria-hidden="true">
+          <div id="vScrollThumb" class="mobile-v-scroll-thumb"></div>
+        </div>
+        <button id="keyboardFab" class="keyboard-fab" type="button" aria-label="Open keyboard" title="Open keyboard">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+              fill="currentColor"
+              d="M20 5H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2Zm0 12H4V7h16v10ZM6 9h2v2H6V9Zm0 3h2v2H6v-2Zm0 3h12v2H6v-2Zm3-3h2v2H9v-2Zm0-3h2v2H9V9Zm3 0h2v2h-2V9Zm0 3h2v2h-2v-2Zm3-3h2v2h-2V9Zm0 3h2v2h-2v-2Zm3-3h2v5h-2V9Z"
+            />
+          </svg>
+        </button>
+      </section>
+    </main>
+
+    <textarea
+      id="keyboardCapture"
+      class="mobile-hidden-keyboard"
+      aria-label="Mobile keyboard capture"
+      autocomplete="off"
+      autocapitalize="off"
+      spellcheck="false"
+    ></textarea>
+
+    <pre id="logs" hidden></pre>
+
+    <script src="/vendor/socket.io.min.js"></script>
+    <script src="/vendor/sc.websocket.js"></script>
+    <script src="/vendor/owt.js"></script>
+    <script type="module">
+      import(`/src/demo/mobile_client.js?ts=${Date.now()}`);
+    </script>
+  </body>
+</html>

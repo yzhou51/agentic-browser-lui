@@ -281,6 +281,37 @@ async function dispatchCommand(command) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const type = String(message?.type || '');
+
+  if (type === 'agentic-register-page') {
+    const tabId = sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: 'Missing sender tab.' });
+      return false;
+    }
+
+    const record = updateTabRecord(tabId, {
+      url: sender.tab?.url || message?.payload?.href || '',
+      title: sender.tab?.title || message?.payload?.title || '',
+      active: Boolean(sender.tab?.active),
+      status: sender.tab?.status || 'unknown',
+      windowId: sender.tab?.windowId,
+      lastActivatedAt: sender.tab?.active ? Date.now() : tabRecords.get(tabId)?.lastActivatedAt || 0,
+    });
+
+    if (!isDaemonUrl(record.url) && isControllableUrl(record.url)) {
+      lastActiveTargetTabId = tabId;
+    }
+
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (type !== 'agentic-daemon-request') {
+    sendResponse({ ok: false, error: `Unsupported runtime message type: ${type}` });
+    return false;
+  }
+
   let responded = false;
   const respond = (payload) => {
     if (responded) {
@@ -300,37 +331,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }, 5000);
 
   (async () => {
-    const type = String(message?.type || '');
-
-    if (type === 'agentic-register-page') {
-      const tabId = sender.tab?.id;
-      if (!tabId) {
-        respond({ ok: false, error: 'Missing sender tab.' });
-        return;
-      }
-
-      const record = updateTabRecord(tabId, {
-        url: sender.tab?.url || message?.payload?.href || '',
-        title: sender.tab?.title || message?.payload?.title || '',
-        active: Boolean(sender.tab?.active),
-        status: sender.tab?.status || 'unknown',
-        windowId: sender.tab?.windowId,
-        lastActivatedAt: sender.tab?.active ? Date.now() : tabRecords.get(tabId)?.lastActivatedAt || 0,
-      });
-
-      if (!isDaemonUrl(record.url) && isControllableUrl(record.url)) {
-        lastActiveTargetTabId = tabId;
-      }
-
-      respond({ ok: true });
-      return;
-    }
-
-    if (type !== 'agentic-daemon-request') {
-      respond({ ok: false, error: `Unsupported runtime message type: ${type}` });
-      return;
-    }
-
     const action = String(message?.action || '');
 
     if (action === 'get_status') {

@@ -27,6 +27,7 @@ Runtime defaults are generated from `.env` into `client-demo.runtime.json`.
 Pages:
 
 - `client.html`: remote client viewer/input page.
+- `mobile_client.html`: mobile-first client page with dedicated keyboard-launch button.
 - `agent.html`: daemon REST action page (launch/close Chrome, open target, send Take Action request).
 
 Default static server listen host is `0.0.0.0`, default port is `5174`.
@@ -77,6 +78,7 @@ These helpers were extracted from the demo so other client UIs can reuse the sam
 - Drag interactions are sent as `mouse_down`, `mouse_move`, and `mouse_up` commands so the daemon can replay press-and-drag flows on the shared page.
 - Static mode serves vendored browser dependencies locally, including `public/vendor/socket.io.min.js`, to avoid CDN dependencies during signaling setup.
 - The client page (`src/demo/client.js`) now focuses on viewer/input control only.
+- The mobile page (`src/demo/mobile_client.js`) is isolated from desktop flow and adds an explicit `Open Keyboard` button for phone text input.
 - Agent REST actions are extracted to `agent.html` (`src/demo/agent.js`):
   - launch Chrome with custom path/params,
   - open target URL,
