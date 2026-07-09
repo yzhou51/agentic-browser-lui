@@ -10,7 +10,7 @@ Client subproject includes:
 
 - Create env file for demo defaults:
   - PowerShell: `Copy-Item .env.example .env`
-  - Edit `SIGNALING_SERVER`, `CLIENT_ID`, and `DAEMON_ID` in `.env` if needed.
+  - Edit `SIGNALING_SERVER`, `CLIENT_ID`, `DAEMON_ID`, and optional STUN/TURN values in `.env` if needed.
 - `pnpm dev`
 
 From workspace root, equivalent command is `pnpm dev:client`.
@@ -37,6 +37,11 @@ Environment values used by static mode:
 - `SIGNALING_SERVER` (default: `http://localhost:8095`)
 - `CLIENT_ID` (default: `client-1`)
 - `DAEMON_ID` (default: `daemon-1`)
+- `STUN_SERVER_URLS` (comma/newline separated, optional)
+- `TURN_SERVER_URLS` (comma/newline separated, optional)
+- `TURN_USERNAME` (optional)
+- `TURN_CREDENTIAL` (optional)
+- `RTC_ICE_SERVERS_JSON` (optional full `iceServers` JSON override/fallback)
 - `CLIENT_STATIC_HOST` (default: `0.0.0.0`)
 - `CLIENT_STATIC_PORT` (default: `5174`)
 
@@ -55,6 +60,10 @@ await client.connect({
   signalingHost: 'http://localhost:8095',
   clientId: 'client-1',
   daemonId: 'daemon-1',
+  stunUrls: ['stun:example.com:3478'],
+  turnUrls: ['turn:example.com:3478?transport=udp'],
+  turnUsername: 'username',
+  turnCredential: 'password',
 });
 await client.sendCommand('open_url', { url: 'https://example.com' });
 ```
@@ -78,6 +87,7 @@ These helpers were extracted from the demo so other client UIs can reuse the sam
 - Drag interactions are sent as `mouse_down`, `mouse_move`, and `mouse_up` commands so the daemon can replay press-and-drag flows on the shared page.
 - Static mode serves vendored browser dependencies locally, including `public/vendor/socket.io.min.js`, to avoid CDN dependencies during signaling setup.
 - The client page (`src/demo/client.js`) now focuses on viewer/input control only.
+- Client and agent forms expose STUN/TURN fields directly after signaling configuration, and those defaults can be generated into `client-demo.runtime.json`.
 - The mobile page (`src/demo/mobile_client.js`) is isolated from desktop flow and adds an explicit `Open Keyboard` button for phone text input.
 - Agent REST actions are extracted to `agent.html` (`src/demo/agent.js`):
   - launch Chrome with custom path/params,

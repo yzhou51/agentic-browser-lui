@@ -1,3 +1,5 @@
+import { normalizeRtcIceOptions } from './rtcConfig.js';
+
 export class AgenticBrowserClient {
   constructor() {
     this.signaling = new window.SignalingChannel();
@@ -15,12 +17,14 @@ export class AgenticBrowserClient {
     this.onReconnectAttempt = null;
   }
 
-  async connect({ signalingHost, clientId, daemonId, forceReconnect = false }) {
+  async connect({ signalingHost, clientId, daemonId, forceReconnect = false, ...rtcInput }) {
+    const rtcOptions = normalizeRtcIceOptions(rtcInput);
     const nextOptions = {
       signalingHost: String(signalingHost || '').trim(),
       clientId: String(clientId || '').trim(),
       daemonId: String(daemonId || '').trim(),
       forceReconnect: Boolean(forceReconnect),
+      ...rtcOptions,
     };
 
     this._connectOptions = nextOptions;
@@ -50,7 +54,7 @@ export class AgenticBrowserClient {
       this.p2p = null;
     }
 
-    this.p2p = new Owt.P2P.P2PClient({ rtcConfiguration: {} }, this.signaling);
+    this.p2p = new Owt.P2P.P2PClient({ rtcConfiguration: nextOptions.rtcConfiguration }, this.signaling);
     if (this.daemonId) {
       this.p2p.allowedRemoteIds = [this.daemonId];
     }
@@ -73,6 +77,7 @@ export class AgenticBrowserClient {
       clientId: this.clientId,
       daemonId: this.daemonId,
       signalingHost: host,
+      rtcConfiguration: nextOptions.rtcConfiguration,
       allowedRemoteIds: this.p2p.allowedRemoteIds,
     });
 

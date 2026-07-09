@@ -26,6 +26,10 @@ async function loadRuntimeConfig() {
   const uidInput = document.getElementById('uid');
   const remoteInput = document.getElementById('remote');
   const hostInput = document.getElementById('host');
+  const stunUrlsInput = document.getElementById('stunUrls');
+  const turnUrlsInput = document.getElementById('turnUrls');
+  const turnUsernameInput = document.getElementById('turnUsername');
+  const turnCredentialInput = document.getElementById('turnCredential');
   const shareBtn = document.getElementById('share');
   const targetUrlInput = document.getElementById('targetUrl');
   const openTargetBtn = document.getElementById('openTarget');
@@ -37,9 +41,67 @@ async function loadRuntimeConfig() {
   const targetFrame = document.getElementById('targetFrame');
   const runtimeConfig = await loadRuntimeConfig();
 
+  function readParamAny(names, fallback = '') {
+    for (const name of names) {
+      const value = params.get(name);
+      if (value && String(value).trim()) {
+        return String(value).trim();
+      }
+    }
+    return fallback;
+  }
+
+  function normalizeIceUrlList(value) {
+    if (Array.isArray(value)) {
+      return value
+        .flatMap((entry) => normalizeIceUrlList(entry))
+        .filter(Boolean);
+    }
+
+    const text = String(value || '').trim();
+    if (!text) {
+      return [];
+    }
+
+    return text
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  function formatIceUrls(value) {
+    return normalizeIceUrlList(value).join('\n');
+  }
+
+  function applyIceConfigFromPayload(payload = {}) {
+    const stunSource = payload.stunUrls ?? payload.stuneUrls;
+    const turnSource = payload.turnUrls;
+    const turnUsername = String(payload.turnUsername ?? payload.turnUser ?? '').trim();
+    const turnCredential = String(payload.turnCredential ?? payload.turnPassword ?? '').trim();
+
+    if (stunUrlsInput) {
+      stunUrlsInput.value = formatIceUrls(stunSource);
+    }
+    if (turnUrlsInput) {
+      turnUrlsInput.value = formatIceUrls(turnSource);
+    }
+    if (turnUsernameInput) {
+      turnUsernameInput.value = turnUsername;
+    }
+    if (turnCredentialInput) {
+      turnCredentialInput.value = turnCredential;
+    }
+  }
+
   uidInput.value = params.get('uid') || runtimeConfig.daemonId || uidInput.value;
   remoteInput.value = params.get('remote') || runtimeConfig.clientId || remoteInput.value;
   hostInput.value = params.get('host') || runtimeConfig.signalingServer || hostInput.value;
+  applyIceConfigFromPayload({
+    stunUrls: readParamAny(['stunUrls', 'STUN_SERVER_URLS'], runtimeConfig.stunUrls ?? runtimeConfig.stuneUrls),
+    turnUrls: readParamAny(['turnUrls', 'TURN_SERVER_URLS'], runtimeConfig.turnUrls),
+    turnUsername: readParamAny(['turnUsername', 'turnUserName', 'turnUser', 'TURN_USERNAME'], runtimeConfig.turnUsername),
+    turnCredential: readParamAny(['turnCredential', 'turnPassword', 'TURN_CREDENTIAL', 'TURN_PASSWORD'], runtimeConfig.turnCredential ?? runtimeConfig.turnPassword),
+  });
 
   let screenStream = null;
   let targetTabWindow = null;
@@ -476,6 +538,10 @@ async function loadRuntimeConfig() {
       daemonId: uidInput.value.trim(),
       clientId: remoteInput.value.trim(),
       signalingServer: hostInput.value.trim(),
+      stunUrls: stunUrlsInput?.value || '',
+      turnUrls: turnUrlsInput?.value || '',
+      turnUsername: turnUsernameInput?.value || '',
+      turnCredential: turnCredentialInput?.value || '',
     }),
     onServerDisconnected: ({ daemonId, clientId, signalingServer }) => {
       console.log('[daemon-agent] signaling server disconnected', { daemonId, remoteId: clientId, signalingHost: signalingServer });
@@ -919,6 +985,7 @@ async function loadRuntimeConfig() {
         if (typeof payload.signalingServer === 'string' && payload.signalingServer.trim()) {
           hostInput.value = payload.signalingServer.trim();
         }
+        applyIceConfigFromPayload(payload);
         return { ok: true, message: 'session updated' };
       }
       case 'open_target': {
@@ -965,11 +1032,15 @@ async function loadRuntimeConfig() {
         if (typeof payload.signalingServer === 'string' && payload.signalingServer.trim()) {
           hostInput.value = payload.signalingServer.trim();
         }
+        applyIceConfigFromPayload(payload);
 
         console.log('CONNECT_ONLY_RECEIVED', {
           daemonId: uidInput.value.trim(),
           clientId: remoteInput.value.trim(),
           signalingServer: hostInput.value.trim(),
+          stunUrls: normalizeIceUrlList(stunUrlsInput?.value || ''),
+          turnUrls: normalizeIceUrlList(turnUrlsInput?.value || ''),
+          turnUsername: String(turnUsernameInput?.value || '').trim(),
           requestId: payload.requestId || '',
           forceReconnect: Boolean(payload.forceReconnect),
         });

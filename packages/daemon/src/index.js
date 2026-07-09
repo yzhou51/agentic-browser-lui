@@ -20,6 +20,10 @@ const agentBridge = new AgentControlBridge({
     daemonId: config.daemonId,
     clientId: config.defaultClientId,
     signalingServer: config.signalingServer,
+    stunUrls: config.stunUrls,
+    turnUrls: config.turnUrls,
+    turnUsername: config.turnUsername,
+    turnCredential: config.turnCredential,
   },
 });
 
@@ -27,6 +31,10 @@ const session = {
   daemonId: config.daemonId,
   clientId: config.defaultClientId,
   signalingServer: config.signalingServer,
+  stunUrls: config.stunUrls,
+  turnUrls: config.turnUrls,
+  turnUsername: config.turnUsername,
+  turnCredential: config.turnCredential,
   staticServerHost: config.staticServerHost,
   staticServerPort: config.staticServerPort,
 };
@@ -82,6 +90,22 @@ if (process.argv.length > 2) {
         }
         if (typeof payload.signalingServer === 'string' && payload.signalingServer.trim()) {
           session.signalingServer = payload.signalingServer.trim();
+        }
+        if (payload.stunUrls !== undefined) {
+          session.stunUrls = Array.isArray(payload.stunUrls)
+            ? payload.stunUrls.join(',')
+            : String(payload.stunUrls || '').trim();
+        }
+        if (payload.turnUrls !== undefined) {
+          session.turnUrls = Array.isArray(payload.turnUrls)
+            ? payload.turnUrls.join(',')
+            : String(payload.turnUrls || '').trim();
+        }
+        if (payload.turnUsername !== undefined) {
+          session.turnUsername = String(payload.turnUsername || '').trim();
+        }
+        if (payload.turnCredential !== undefined || payload.turnPassword !== undefined) {
+          session.turnCredential = String(payload.turnCredential ?? payload.turnPassword ?? '').trim();
         }
       }
       return agentBridge.enqueue(type, payload);

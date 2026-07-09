@@ -105,6 +105,14 @@
         <input id="remote" value="client-1" />
         <label for="host">Signaling Host</label>
         <input id="host" value="http://localhost:8095" />
+        <label for="stunUrls">STUN URLs (comma or newline separated)</label>
+        <input id="stunUrls" value="" placeholder="stun:example.com:3478" />
+        <label for="turnUrls">TURN URLs (comma or newline separated)</label>
+        <input id="turnUrls" value="" placeholder="turn:example.com:3478?transport=udp,turn:example.com:3478?transport=tcp" />
+        <label for="turnUsername">TURN Username</label>
+        <input id="turnUsername" value="" placeholder="username" />
+        <label for="turnCredential">TURN Credential</label>
+        <input id="turnCredential" value="" placeholder="password" />
         <div>
           <button id="connect">Connect</button>
           <button id="share">Share Screen</button>

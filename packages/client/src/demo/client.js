@@ -2,6 +2,7 @@ import {
   AgenticBrowserClient,
   createViewerMouseCommandSender,
 } from '../sdk/index.js';
+import { formatIceUrls, normalizeRtcIceOptions, parseRtcIceServersJson } from '../sdk/rtcConfig.js';
 
 async function loadRuntimeConfig() {
   try {
@@ -27,6 +28,10 @@ async function init() {
     clientId: document.getElementById('clientId'),
     remoteId: document.getElementById('remoteId'),
     signalingUrl: document.getElementById('signalingUrl'),
+    stunUrls: document.getElementById('stunUrls'),
+    turnUrls: document.getElementById('turnUrls'),
+    turnUsername: document.getElementById('turnUsername'),
+    turnCredential: document.getElementById('turnCredential'),
     status: document.getElementById('status'),
     connectBtn: document.getElementById('connectBtn'),
     disconnectBtn: document.getElementById('disconnectBtn'),
@@ -42,6 +47,25 @@ async function init() {
   const envSignalingServer = runtimeConfig.signalingServer || import.meta.env?.SIGNALING_SERVER || window.location.origin;
   const envClientId = runtimeConfig.clientId || import.meta.env?.CLIENT_ID;
   const envDaemonId = runtimeConfig.daemonId || import.meta.env?.DAEMON_ID;
+  const runtimeStunUrls = runtimeConfig.stunUrls ?? runtimeConfig.stuneUrls;
+  const runtimeTurnUrls = runtimeConfig.turnUrls;
+  const runtimeTurnUsername = runtimeConfig.turnUsername;
+  const runtimeTurnCredential = runtimeConfig.turnCredential ?? runtimeConfig.turnPassword;
+  const hasExplicitIceFields = Boolean(
+    runtimeStunUrls || runtimeTurnUrls || runtimeTurnUsername || runtimeTurnCredential
+  );
+  const envIceConfig = normalizeRtcIceOptions({
+    ...runtimeConfig,
+    stunUrls: runtimeStunUrls ?? import.meta.env?.STUN_SERVER_URLS,
+    turnUrls: runtimeTurnUrls ?? import.meta.env?.TURN_SERVER_URLS,
+    turnUsername: runtimeTurnUsername ?? import.meta.env?.TURN_USERNAME,
+    turnCredential: runtimeTurnCredential ?? import.meta.env?.TURN_CREDENTIAL,
+    rtcIceServers: hasExplicitIceFields
+      ? []
+      : (Array.isArray(runtimeConfig.rtcIceServers) && runtimeConfig.rtcIceServers.length
+        ? runtimeConfig.rtcIceServers
+        : parseRtcIceServersJson(import.meta.env?.RTC_ICE_SERVERS_JSON)),
+  });
 
   if (envSignalingServer) {
     el.signalingUrl.value = envSignalingServer;
@@ -51,6 +75,49 @@ async function init() {
   }
   if (envDaemonId) {
     el.remoteId.value = envDaemonId;
+  }
+  if (envIceConfig.stunUrls.length) {
+    el.stunUrls.value = formatIceUrls(envIceConfig.stunUrls);
+  }
+  if (envIceConfig.turnUrls.length) {
+    el.turnUrls.value = formatIceUrls(envIceConfig.turnUrls);
+  }
+  if (envIceConfig.turnUsername) {
+    el.turnUsername.value = envIceConfig.turnUsername;
+  }
+  if (envIceConfig.turnCredential) {
+    el.turnCredential.value = envIceConfig.turnCredential;
+  }
+
+  function getRtcConnectOptions() {
+    return normalizeRtcIceOptions({
+      stunUrls: el.stunUrls.value,
+      turnUrls: el.turnUrls.value,
+      turnUsername: el.turnUsername.value,
+      turnCredential: el.turnCredential.value,
+    });
+  }
+
+  function summarizeIceConfigForLog(rtcOptions) {
+    const iceServers = Array.isArray(rtcOptions?.rtcIceServers) ? rtcOptions.rtcIceServers : [];
+    const stunUrls = iceServers
+      .flatMap((entry) => (Array.isArray(entry?.urls) ? entry.urls : [entry?.urls]))
+      .filter((url) => /^stuns?:/i.test(String(url || '').trim()));
+    const turnUrls = iceServers
+      .flatMap((entry) => (Array.isArray(entry?.urls) ? entry.urls : [entry?.urls]))
+      .filter((url) => /^turns?:/i.test(String(url || '').trim()));
+    const firstTurnServer = iceServers.find((entry) => {
+      const urls = Array.isArray(entry?.urls) ? entry.urls : [entry?.urls];
+      return urls.some((url) => /^turns?:/i.test(String(url || '').trim()));
+    });
+
+    return {
+      stunUrls,
+      turnUrls,
+      turnUsername: firstTurnServer?.username || '',
+      hasTurnCredential: Boolean(firstTurnServer?.credential),
+      iceServerCount: iceServers.length,
+    };
   }
 
   function getActiveDaemonId() {
@@ -217,11 +284,20 @@ async function init() {
     setStatus('connecting', `Connecting to daemon "${daemonId}" via "${el.signalingUrl.value}"...`);
     log(`Connecting to signaling server "${el.signalingUrl.value}" for daemon "${daemonId}".`);
     try {
+      const rtcOptions = getRtcConnectOptions();
+      console.log('[client] p2p connect config', {
+        signalingServer: String(el.signalingUrl.value || '').trim(),
+        daemonId,
+        clientId: String(el.clientId.value || '').trim(),
+        ...summarizeIceConfigForLog(rtcOptions),
+      });
+
       await client.connect({
         signalingHost: el.signalingUrl.value,
         clientId: el.clientId.value,
         daemonId,
         forceReconnect: true,
+        ...rtcOptions,
       });
       connected = true;
       updateActionRequestView();

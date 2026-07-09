@@ -78,6 +78,45 @@ function withCorsHeaders(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
+function trimString(value, fallback = '') {
+  const text = String(value ?? '').trim();
+  return text || fallback;
+}
+
+function normalizeIceUrlList(value) {
+  if (Array.isArray(value)) {
+    return value
+      .flatMap((entry) => normalizeIceUrlList(entry))
+      .filter(Boolean);
+  }
+
+  const text = trimString(value);
+  if (!text) {
+    return [];
+  }
+
+  return text
+    .split(/[\n,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function withIceDefaults(payload = {}, defaults = {}) {
+  return {
+    daemonId: trimString(payload.daemonId, trimString(defaults.daemonId)),
+    clientId: trimString(payload.clientId, trimString(defaults.clientId)),
+    signalingServer: trimString(payload.signalingServer, trimString(defaults.signalingServer)),
+    stunUrls: normalizeIceUrlList(payload.stunUrls ?? payload.stuneUrls).length
+      ? normalizeIceUrlList(payload.stunUrls ?? payload.stuneUrls)
+      : normalizeIceUrlList(defaults.stunUrls ?? defaults.stuneUrls),
+    turnUrls: normalizeIceUrlList(payload.turnUrls).length
+      ? normalizeIceUrlList(payload.turnUrls)
+      : normalizeIceUrlList(defaults.turnUrls),
+    turnUsername: trimString(payload.turnUsername ?? payload.turnUser, trimString(defaults.turnUsername)),
+    turnCredential: trimString(payload.turnCredential ?? payload.turnPassword, trimString(defaults.turnCredential ?? defaults.turnPassword)),
+  };
+}
+
 export function startStaticServer({
   rootDir,
   browserModuleDir,
@@ -279,12 +318,39 @@ export function startStaticServer({
 
           if (String(payload.name || '').trim() === 'agent-target') {
             const agentConfig = typeof getDaemonAgentConfig === 'function' ? getDaemonAgentConfig() : {};
+            const sessionConfig = withIceDefaults(payload, agentConfig);
+
+            enqueueAgentCommand('set_session', {
+              daemonId: sessionConfig.daemonId,
+              clientId: sessionConfig.clientId,
+              signalingServer: sessionConfig.signalingServer,
+              stunUrls: sessionConfig.stunUrls,
+              turnUrls: sessionConfig.turnUrls,
+              turnUsername: sessionConfig.turnUsername,
+              turnCredential: sessionConfig.turnCredential,
+            });
+
             const openHost = host === '0.0.0.0' || host === '::' ? 'localhost' : host;
-            const daemonAgentUrl = `http://${openHost}:${port}/daemon-agent.html?uid=${encodeURIComponent(String(agentConfig?.daemonId || ''))}&remote=${encodeURIComponent(String(agentConfig?.clientId || ''))}&host=${encodeURIComponent(String(agentConfig?.signalingServer || ''))}`;
+            const daemonAgentUrl = new URL(`http://${openHost}:${port}/daemon-agent.html`);
+            daemonAgentUrl.searchParams.set('uid', sessionConfig.daemonId);
+            daemonAgentUrl.searchParams.set('remote', sessionConfig.clientId);
+            daemonAgentUrl.searchParams.set('host', sessionConfig.signalingServer);
+            if (sessionConfig.stunUrls.length) {
+              daemonAgentUrl.searchParams.set('stunUrls', sessionConfig.stunUrls.join(','));
+            }
+            if (sessionConfig.turnUrls.length) {
+              daemonAgentUrl.searchParams.set('turnUrls', sessionConfig.turnUrls.join(','));
+            }
+            if (sessionConfig.turnUsername) {
+              daemonAgentUrl.searchParams.set('turnUsername', sessionConfig.turnUsername);
+            }
+            if (sessionConfig.turnCredential) {
+              daemonAgentUrl.searchParams.set('turnCredential', sessionConfig.turnCredential);
+            }
 
             await submitCommand({
               type: 'open_url',
-              payload: { url: daemonAgentUrl },
+              payload: { url: daemonAgentUrl.toString() },
             });
           }
 
@@ -331,6 +397,10 @@ export function startStaticServer({
           const daemonId = String(payload.daemonId || '').trim();
           const clientId = String(payload.clientId || '').trim();
           const signalingServer = String(payload.signalingServer || '').trim();
+          const stunUrls = payload.stunUrls ?? payload.stuneUrls ?? '';
+          const turnUrls = payload.turnUrls ?? '';
+          const turnUsername = payload.turnUsername ?? payload.turnUser ?? '';
+          const turnCredential = payload.turnCredential ?? payload.turnPassword ?? '';
 
           if (!daemonId || !clientId) {
             writeJson(res, 400, { ok: false, error: 'daemonId and clientId are required.' });
@@ -341,11 +411,19 @@ export function startStaticServer({
             daemonId,
             clientId,
             signalingServer,
+            stunUrls,
+            turnUrls,
+            turnUsername,
+            turnCredential,
           });
           const connectAndShare = enqueueAgentCommand('connect_share', {
             daemonId,
             clientId,
             signalingServer,
+            stunUrls,
+            turnUrls,
+            turnUsername,
+            turnCredential,
             automated: true,
           });
 
@@ -378,6 +456,10 @@ export function startStaticServer({
           const clientId = String(payload.clientId || '').trim();
           const signalingServer = String(payload.signalingServer || '').trim();
           const targetUrl = String(payload.targetUrl || '').trim();
+          const stunUrls = payload.stunUrls ?? payload.stuneUrls ?? '';
+          const turnUrls = payload.turnUrls ?? '';
+          const turnUsername = payload.turnUsername ?? payload.turnUser ?? '';
+          const turnCredential = payload.turnCredential ?? payload.turnPassword ?? '';
 
           if (!daemonId || !clientId) {
             writeJson(res, 400, { ok: false, error: 'daemonId and clientId are required.' });
@@ -389,6 +471,10 @@ export function startStaticServer({
             daemonId,
             clientId,
             signalingServer,
+            stunUrls,
+            turnUrls,
+            turnUsername,
+            turnCredential,
           });
           const resetConnection = enqueueAgentCommand('disconnect', {
             reason: 'take_action_reset',
@@ -398,6 +484,10 @@ export function startStaticServer({
             daemonId,
             clientId,
             signalingServer,
+            stunUrls,
+            turnUrls,
+            turnUsername,
+            turnCredential,
             requestId,
             forceReconnect: true,
           });

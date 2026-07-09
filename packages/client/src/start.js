@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
+import { normalizeRtcIceOptions, parseRtcIceServersJson } from './sdk/rtcConfig.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,6 +18,31 @@ const signalingServer = process.env.SIGNALING_SERVER || 'http://localhost:8095';
 const clientId = process.env.CLIENT_ID || 'client-1';
 const daemonId = process.env.DAEMON_ID || 'daemon-1';
 
+const parsedRtcIceServers = parseRtcIceServersJson(process.env.RTC_ICE_SERVERS_JSON);
+if (String(process.env.RTC_ICE_SERVERS_JSON || '').trim() && !parsedRtcIceServers.length) {
+  console.warn('Ignoring invalid RTC_ICE_SERVERS_JSON in client .env.');
+}
+
+const hasExplicitIceEnv = [
+  process.env.STUN_SERVER_URLS,
+  process.env.TURN_SERVER_URLS,
+  process.env.TURN_USERNAME,
+  process.env.TURN_CREDENTIAL,
+].some((value) => String(value || '').trim());
+
+const runtimeIceConfig = normalizeRtcIceOptions(
+  hasExplicitIceEnv
+    ? {
+        stunUrls: process.env.STUN_SERVER_URLS,
+        turnUrls: process.env.TURN_SERVER_URLS,
+        turnUsername: process.env.TURN_USERNAME,
+        turnCredential: process.env.TURN_CREDENTIAL,
+      }
+    : {
+        rtcIceServers: parsedRtcIceServers,
+      }
+);
+
 const publicHost = staticHost === '0.0.0.0' ? os.hostname() : staticHost;
 
 const runtimeConfigPath = path.resolve(rootDir, 'client-demo.runtime.json');
@@ -27,6 +53,11 @@ fs.writeFileSync(
       signalingServer,
       clientId,
       daemonId,
+      stunUrls: runtimeIceConfig.stunUrls,
+      turnUrls: runtimeIceConfig.turnUrls,
+      turnUsername: runtimeIceConfig.turnUsername,
+      turnCredential: runtimeIceConfig.turnCredential,
+      rtcIceServers: runtimeIceConfig.rtcIceServers,
     },
     null,
     2

@@ -1,3 +1,5 @@
+import { formatIceUrls, normalizeRtcIceOptions, parseRtcIceServersJson } from '../sdk/rtcConfig.js';
+
 async function loadRuntimeConfig() {
   try {
     const response = await fetch('/client-demo.runtime.json', { cache: 'no-store' });
@@ -47,6 +49,10 @@ async function init() {
     clientId: document.getElementById('clientId'),
     daemonId: document.getElementById('daemonId'),
     signalingUrl: document.getElementById('signalingUrl'),
+    stunUrls: document.getElementById('stunUrls'),
+    turnUrls: document.getElementById('turnUrls'),
+    turnUsername: document.getElementById('turnUsername'),
+    turnCredential: document.getElementById('turnCredential'),
     daemonApiUrl: document.getElementById('daemonApiUrl'),
     chromePath: document.getElementById('chromePath'),
     chromeParams: document.getElementById('chromeParams'),
@@ -62,6 +68,16 @@ async function init() {
   const envSignalingServer = runtimeConfig.signalingServer || import.meta.env?.SIGNALING_SERVER || window.location.origin;
   const envClientId = runtimeConfig.clientId || import.meta.env?.CLIENT_ID;
   const envDaemonId = runtimeConfig.daemonId || import.meta.env?.DAEMON_ID;
+  const envIceConfig = normalizeRtcIceOptions({
+    ...runtimeConfig,
+    stunUrls: runtimeConfig.stunUrls ?? import.meta.env?.STUN_SERVER_URLS,
+    turnUrls: runtimeConfig.turnUrls ?? import.meta.env?.TURN_SERVER_URLS,
+    turnUsername: runtimeConfig.turnUsername ?? import.meta.env?.TURN_USERNAME,
+    turnCredential: runtimeConfig.turnCredential ?? import.meta.env?.TURN_CREDENTIAL,
+    rtcIceServers: Array.isArray(runtimeConfig.rtcIceServers) && runtimeConfig.rtcIceServers.length
+      ? runtimeConfig.rtcIceServers
+      : parseRtcIceServersJson(import.meta.env?.RTC_ICE_SERVERS_JSON),
+  });
 
   if (envSignalingServer) {
     el.signalingUrl.value = envSignalingServer;
@@ -72,8 +88,37 @@ async function init() {
   if (envDaemonId) {
     el.daemonId.value = envDaemonId;
   }
+  if (envIceConfig.stunUrls.length) {
+    el.stunUrls.value = formatIceUrls(envIceConfig.stunUrls);
+  }
+  if (envIceConfig.turnUrls.length) {
+    el.turnUrls.value = formatIceUrls(envIceConfig.turnUrls);
+  }
+  if (envIceConfig.turnUsername) {
+    el.turnUsername.value = envIceConfig.turnUsername;
+  }
+  if (envIceConfig.turnCredential) {
+    el.turnCredential.value = envIceConfig.turnCredential;
+  }
   if (!el.daemonApiUrl.value) {
     el.daemonApiUrl.value = 'http://localhost:8788';
+  }
+
+  function getRtcConfigFields() {
+    const rtcOptions = normalizeRtcIceOptions({
+      stunUrls: el.stunUrls.value,
+      turnUrls: el.turnUrls.value,
+      turnUsername: el.turnUsername.value,
+      turnCredential: el.turnCredential.value,
+    });
+
+    return {
+      stunUrls: rtcOptions.stunUrls,
+      turnUrls: rtcOptions.turnUrls,
+      turnUsername: rtcOptions.turnUsername,
+      turnCredential: rtcOptions.turnCredential,
+      rtcIceServers: rtcOptions.rtcIceServers,
+    };
   }
 
   function setStatus(state, message) {
@@ -143,9 +188,24 @@ async function init() {
   el.openUrlBtn.addEventListener('click', async () => {
     setStatus('connecting', `Opening target page "${el.targetUrl.value}"...`);
     try {
+      const request = {
+        daemonId: el.daemonId.value,
+        clientId: el.clientId.value,
+        signalingServer: el.signalingUrl.value,
+        targetUrl: el.targetUrl.value,
+        ...getRtcConfigFields(),
+      };
+
       await callDaemonApi('/api/v1/page/open', {
         name: 'agent-target',
-        url: el.targetUrl.value,
+        url: request.targetUrl,
+        daemonId: request.daemonId,
+        clientId: request.clientId,
+        signalingServer: request.signalingServer,
+        stunUrls: request.stunUrls,
+        turnUrls: request.turnUrls,
+        turnUsername: request.turnUsername,
+        turnCredential: request.turnCredential,
       });
       setStatus('connected', `Open Target Page request sent for "${el.targetUrl.value}".`);
       log(`open_url requested via daemon REST API: ${el.targetUrl.value}`);
@@ -163,6 +223,7 @@ async function init() {
         clientId: el.clientId.value,
         signalingServer: el.signalingUrl.value,
         targetUrl: el.targetUrl.value,
+        ...getRtcConfigFields(),
       };
 
       const response = await callDaemonApi('/api/v1/action/request', request);
@@ -175,6 +236,11 @@ async function init() {
           daemonId: request.daemonId,
           clientId: request.clientId,
           signalingServer: request.signalingServer,
+          stunUrls: request.stunUrls,
+          turnUrls: request.turnUrls,
+          turnUsername: request.turnUsername,
+          turnCredential: request.turnCredential,
+          rtcIceServers: request.rtcIceServers,
           targetUrl: request.targetUrl,
           createdAt: new Date().toISOString(),
         });

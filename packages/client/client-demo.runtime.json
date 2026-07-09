@@ -1,5 +1,27 @@
 {
   "signalingServer": "http://shwdewpeyogalnl.ccr.corp.intel.com:8095",
   "clientId": "client-1",
-  "daemonId": "daemon-1"
+  "daemonId": "daemon-1",
+  "stunUrls": [
+    "stun:example.com:3478"
+  ],
+  "turnUrls": [
+    "turn:example.com:3478?transport=udp",
+    "turn:example.com:3478?transport=tcp"
+  ],
+  "turnUsername": "username",
+  "turnCredential": "password",
+  "rtcIceServers": [
+    {
+      "urls": "stun:example.com:3478"
+    },
+    {
+      "urls": [
+        "turn:example.com:3478?transport=udp",
+        "turn:example.com:3478?transport=tcp"
+      ],
+      "username": "username",
+      "credential": "password"
+    }
+  ]
 }

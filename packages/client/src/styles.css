@@ -100,12 +100,19 @@ label {
   color: var(--muted);
 }
 
-input {
+input,
+textarea {
   background: #060b17;
   border: 1px solid #22324d;
   color: var(--ink);
   border-radius: 9px;
   padding: 10px;
+}
+
+textarea {
+  min-height: 72px;
+  resize: vertical;
+  font: inherit;
 }
 
 button {
