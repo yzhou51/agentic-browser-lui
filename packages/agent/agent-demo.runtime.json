@@ -1,5 +1,5 @@
 {
-  "signalingServer": "http://shwdewpeyogalnl.ccr.corp.intel.com:8095",
+  "signalingServer": "http://localhost:8095",
   "clientId": "client-1",
   "daemonId": "daemon-1",
   "stunUrls": [],

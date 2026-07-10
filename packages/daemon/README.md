@@ -8,8 +8,6 @@ It provides:
 - Runtime config generation for daemon peer page from `.env`.
 - Static file hosting for `public/` so daemon page is opened over `http://`.
 - Browser daemon peer page (`public/daemon-agent.html`) that connects to OWT signaling server and exchanges data over `Owt.P2P.P2PClient`.
-- Browser-safe daemon modules in `src/daemon/` that are served to the page as `/daemon-src/*`.
-- Chrome extension bridge in `extension/` for cross-origin input replay and user-opened tab control.
 - REST API endpoints for agent-driven daemon control (launch/open/share/close/exit).
 
 There is no daemon signaling API in this mode. The built-in static server only serves local frontend files.
@@ -40,13 +38,13 @@ The same static server also exposes browser modules from `src/daemon/` under `/d
 ## Alternative Dev Mode
 
 - `pnpm dev:daemon` from workspace root
-- `pnpm dev` from workspace root (runs daemon and client dev servers together)
+- `pnpm dev` from workspace root (runs daemon, client, and agent together)
 
 ## Environment Variables
 
 `src/config.js` loads values from `.env` automatically.
 
-- `SIGNALING_SERVER` (default: `http://localhost:8095`)
+- `SIGNALING_SERVER` (default: `${SIGNALING_SERVER}`)
 - `DAEMON_ID` (default: `daemon-1`)
 - `CLIENT_ID` (default: `client-1`)
 - `DAEMON_STATIC_HOST` (default: `0.0.0.0`)
@@ -57,63 +55,78 @@ The same static server also exposes browser modules from `src/daemon/` under `/d
 - `PUPPETEER_BROWSER_CHANNEL` (default: `chrome`)
 - `PUPPETEER_EXECUTABLE_PATH` (optional)
 
-Daemon launches Chrome with unpacked extension support enabled. On branded Chrome builds this includes disabling the `DisableLoadExtensionCommandLineSwitch` feature so `--load-extension` is honored.
+Daemon launches Chrome through Puppeteer and controls a dedicated target page directly.
 
 ## REST API (Agent Workflow)
 
 Base URL defaults to `http://localhost:8788`.
 
 - `GET /api/v1/status`
-	- Returns daemon runtime state, browser status, and daemon-agent bridge status.
+  - Returns daemon runtime state, browser status, and daemon-agent bridge status.
 - `GET /api/v1/agent/ready`
-	- Returns whether daemon-agent bridge is online.
-	- Use `?bootstrap=true` to auto-launch/open daemon-agent and wait for bridge readiness.
+  - Returns whether daemon-agent bridge is online.
+  - Use `?bootstrap=true` to auto-launch/open daemon-agent and wait for bridge readiness.
 - `POST /api/v1/chrome/launch`
-	- Launches headful Chrome through Puppeteer.
-	- Body example:
-		```json
-		{
-			"chrome": "/usr/bin/google-chrome",
-			"params": [
-				{ "name": "--proxy-server", "value": "http://127.0.0.1:8888" },
-				{ "name": "--other" },
-				{ "name": "--bypass-proxy-list", "value": "localhost,127.0.0.1" }
-			]
-		}
-		```
+  - Launches headful Chrome through Puppeteer.
+  - Body example:
+
+    ```json
+    {
+      "chrome": "/usr/bin/google-chrome",
+      "params": [
+        { "name": "--proxy-server", "value": "http://127.0.0.1:8888" },
+        { "name": "--other" },
+        { "name": "--bypass-proxy-list", "value": "localhost,127.0.0.1" }
+      ]
+    }
+    ```
+
 - `POST /api/v1/page/open`
-	- Enqueues target open on daemon-agent page (extension-aware path).
-	- Body example:
-		```json
-		{
-			"name": "zhihu",
-			"url": "https://www.zhihu.com/signin?next=%2F"
-		}
-		```
-- `POST /api/v1/action/request`
-	- Primary Take Action flow: enqueue daemon-agent session update, signaling connect-only, and client notification.
-	- Body example:
-		```json
-		{
-			"daemonId": "daemon-1",
-			"clientId": "client-1",
-			"signalingServer": "http://localhost:8095",
-			"targetUrl": "https://www.zhihu.com/signin?next=%2F"
-		}
-		```
+  - Enqueues target open on daemon-agent page.
+  - Body example:
+
+    ```json
+    {
+      "name": "zhihu",
+      "url": "https://www.zhihu.com/signin?next=%2F"
+    }
+    ```
+
+- `POST /api/v1/action/connect`
+  - Primary Take Action flow: enqueue daemon-agent session update, signaling connect-only, and client notification.
+  - Body example:
+
+    ```json
+    {
+      "daemonId": "daemon-1",
+      "clientId": "client-1",
+      "signalingServer": "${SIGNALING_SERVER}",
+      "stunUrls": "stun:example.com:3478",
+      "turnUrls": "turn:example.com:3478?transport=udp,turn:example.com:3478?transport=tcp",
+      "turnUsername": "username",
+      "turnCredential": "password",
+      "targetUrl": "https://www.zhihu.com/signin?next=%2F"
+    }
+    ```
+
 - `POST /api/v1/share/start`
-	- Legacy convenience flow: enqueues daemon-agent connect + immediate share.
-	- Body example:
-		```json
-		{
-			"daemonId": "daemon-1",
-			"clientId": "client-1"
-		}
-		```
+  - Legacy convenience flow: enqueues daemon-agent connect + immediate share.
+  - Body example:
+
+    ```json
+    {
+      "daemonId": "daemon-1",
+      "clientId": "client-1"
+    }
+    ```
+
+- `POST /api/v1/share/stop`
+  - Stops active sharing by enqueueing a daemon-agent disconnect.
+  - After stop completes, call `POST /api/v1/share/start` again to trigger a fresh share.
 - `POST /api/v1/page/close`
-	- Enqueues target close on daemon-agent page.
+  - Enqueues target close on daemon-agent page.
 - `POST /api/v1/chrome/exit`
-	- Exits Puppeteer-launched Chrome.
+  - Exits Puppeteer-launched Chrome.
 
 Bridge endpoints used internally by daemon-agent page:
 
@@ -122,8 +135,8 @@ Bridge endpoints used internally by daemon-agent page:
 
 Important:
 
-- `page/open`, `page/close`, `action/request`, and `share/start` require daemon-agent page to be open and polling bridge commands.
-- This keeps cross-origin replay in browser context where extension and screen-share APIs are available.
+- `page/open`, `page/close`, `action/connect`, `share/start`, and `share/stop` require daemon-agent page to be open and polling bridge commands.
+- This keeps screen-share and bridge-triggered control in the daemon-agent browser context.
 
 Example curl sequence for the full agent flow is in `tests/scripts/daemon-rest-api-curl.sh`.
 
@@ -133,36 +146,15 @@ Example curl sequence for the full agent flow is in `tests/scripts/daemon-rest-a
 - Daemon peer page sets `p2p.allowedRemoteIds = [clientId]`.
 - Commands and results are exchanged over OWT data channel (`p2p.send` and `messagereceived`).
 
-## Cross-Origin Page Control (Extension)
-
-For pages that cannot be directly scripted by `daemon-agent` (for example `https://www.zhihu.com/signin?next=%2F`), use the extension bridge:
-
-1. Load unpacked extension from `packages/daemon/extension` in Chrome (`chrome://extensions`).
-2. Open daemon peer page.
-3. Either:
-	- open target page from daemon page, or
-	- open target page manually and then click `Bind Last Active Tab` in daemon page.
-4. Refresh target page once after extension is installed.
-5. Click `Check Extension` in daemon page and confirm status is active.
-6. Click `Share Screen` and select the same target tab in browser picker.
-
-The extension listens for `postMessage` commands and replays mouse/keyboard/text input on that cross-origin page. A background service worker also tracks the extension-managed target tab so user-opened pages can be controlled without relying on `window.open`/`window.opener`.
-
 ## Daemon Page Behavior
 
-- `Open In New Tab` keeps the traditional daemon-opened target flow.
-- `Bind Last Active Tab` switches control to the last active extension-visible browser tab.
-- `Check Extension` explicitly verifies that the target page can answer the extension ping.
-- The page also polls extension status automatically and shows a controlled-tab indicator.
-- When an extension-managed target is active, command routing prefers that controlled tab over any stale direct tab handle.
-- The page also polls daemon REST bridge commands (`/api/v1/agent/commands`) and can execute Agent-triggered actions.
+- The page receives bridge commands from daemon REST (`/api/v1/agent/commands`) and executes them.
+- Target open/close and command replay route to Puppeteer target control.
 
 ## Frontend Refactor
 
-- `public/daemon-agent.js` now focuses on orchestration, UI updates, OWT setup, and command/result logging.
-- Extension request/ack handling lives in `src/daemon/extensionBridge.browser.js`.
-- Target-tab DOM replay and coordinate mapping live in `src/daemon/targetTabForwarding.browser.js`.
-- Direct local command support in Node remains in `src/daemon/browserController.js` and `src/daemon/commandProcessor.js`.
+- `public/daemon-agent.js` focuses on orchestration, OWT setup, and command/result logging.
+- Direct local command support in Node lives in `src/daemon/browserController.js` and `src/daemon/commandProcessor.js`.
 
 ## Local CLI
 

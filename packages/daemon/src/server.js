@@ -162,7 +162,7 @@ export function startStaticServer({
 
     return {
       ok: false,
-      error: 'daemon-agent bridge did not come online in time. Check daemon Chrome window and extension state.',
+      error: 'daemon-agent bridge did not come online in time. Check daemon Chrome window and daemon-agent page state.',
     };
   }
 
@@ -439,7 +439,7 @@ export function startStaticServer({
       return;
     }
 
-    if (req.url === '/api/v1/action/request' && req.method === 'POST') {
+    if (req.url === '/api/v1/action/connect' && req.method === 'POST') {
       withCorsHeaders(res);
       readJsonBody(req)
         .then(async (payload) => {

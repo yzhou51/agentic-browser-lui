@@ -1,28 +1,18 @@
 import {
   AgenticBrowserClient,
   createViewerMouseCommandSender,
+  loadClientRuntimeConfig,
+  summarizeIceConfigForLog,
 } from '../sdk/index.js';
 import { formatIceUrls, normalizeRtcIceOptions, parseRtcIceServersJson } from '../sdk/rtcConfig.js';
 
-async function loadRuntimeConfig() {
-  try {
-    const response = await fetch('/client-demo.runtime.json', { cache: 'no-store' });
-    if (!response.ok) {
-      return {};
-    }
-    const config = await response.json();
-    return config && typeof config === 'object' ? config : {};
-  } catch {
-    return {};
-  }
-}
-
 async function init() {
-  const runtimeConfig = await loadRuntimeConfig();
+  const runtimeConfig = await loadClientRuntimeConfig('/client-demo.runtime.json');
   const client = new AgenticBrowserClient();
   let activePointerId = null;
   let isMousePressed = false;
   let connected = false;
+  let leaveSent = false;
 
   const el = {
     clientId: document.getElementById('clientId'),
@@ -98,30 +88,36 @@ async function init() {
     });
   }
 
-  function summarizeIceConfigForLog(rtcOptions) {
-    const iceServers = Array.isArray(rtcOptions?.rtcIceServers) ? rtcOptions.rtcIceServers : [];
-    const stunUrls = iceServers
-      .flatMap((entry) => (Array.isArray(entry?.urls) ? entry.urls : [entry?.urls]))
-      .filter((url) => /^stuns?:/i.test(String(url || '').trim()));
-    const turnUrls = iceServers
-      .flatMap((entry) => (Array.isArray(entry?.urls) ? entry.urls : [entry?.urls]))
-      .filter((url) => /^turns?:/i.test(String(url || '').trim()));
-    const firstTurnServer = iceServers.find((entry) => {
-      const urls = Array.isArray(entry?.urls) ? entry.urls : [entry?.urls];
-      return urls.some((url) => /^turns?:/i.test(String(url || '').trim()));
-    });
-
-    return {
-      stunUrls,
-      turnUrls,
-      turnUsername: firstTurnServer?.username || '',
-      hasTurnCredential: Boolean(firstTurnServer?.credential),
-      iceServerCount: iceServers.length,
-    };
-  }
-
   function getActiveDaemonId() {
     return String(el.remoteId?.value || '').trim();
+  }
+
+  function sendLeaveMessage(reason) {
+    if (leaveSent || !connected) {
+      return;
+    }
+
+    const daemonId = getActiveDaemonId();
+    if (!daemonId) {
+      return;
+    }
+
+    leaveSent = true;
+    client.setDaemonId(daemonId);
+    const leaveMessage = {
+      type: 'leave',
+      requestId: `leave-${Date.now()}`,
+      payload: {
+        clientId: String(el.clientId?.value || '').trim(),
+        reason,
+      },
+    };
+
+    try {
+      void client.sendMessage(leaveMessage, daemonId).catch(() => {});
+    } catch {
+      // Keep close flow best-effort only.
+    }
   }
 
   function log(message) {
@@ -300,6 +296,7 @@ async function init() {
         ...rtcOptions,
       });
       connected = true;
+      leaveSent = false;
       updateActionRequestView();
       setStatus('connected', `Connected to signaling for daemon "${daemonId}". Click Resolve to start screen share.`);
       log('Connected to signaling and daemon peer endpoint.');
@@ -318,9 +315,18 @@ async function init() {
   el.disconnectBtn.addEventListener('click', async () => {
     await client.disconnect();
     connected = false;
+    leaveSent = false;
     updateActionRequestView();
     setStatus('idle', 'Disconnected. Not connected to daemon.');
     log('Disconnected.');
+  });
+
+  window.addEventListener('pagehide', () => {
+    sendLeaveMessage('pagehide');
+  });
+
+  window.addEventListener('beforeunload', () => {
+    sendLeaveMessage('beforeunload');
   });
 
   el.resolveBtn.addEventListener('click', async () => {

@@ -2,7 +2,7 @@ import { formatIceUrls, normalizeRtcIceOptions, parseRtcIceServersJson } from '.
 
 async function loadRuntimeConfig() {
   try {
-    const response = await fetch('/client-demo.runtime.json', { cache: 'no-store' });
+    const response = await fetch('/agent-demo.runtime.json', { cache: 'no-store' });
     if (!response.ok) {
       return {};
     }
@@ -62,6 +62,7 @@ async function init() {
     closeChromeBtn: document.getElementById('closeChromeBtn'),
     openUrlBtn: document.getElementById('openUrlBtn'),
     takeActionBtn: document.getElementById('takeActionBtn'),
+    stopShareBtn: document.getElementById('stopShareBtn'),
     logs: document.getElementById('logs'),
   };
 
@@ -174,10 +175,18 @@ async function init() {
   });
 
   el.closeChromeBtn.addEventListener('click', async () => {
-    setStatus('connecting', 'Closing Chrome...');
+    setStatus('connecting', 'Stopping sharing and closing Chrome...');
     try {
+      try {
+        await callDaemonApi('/api/v1/share/stop', {});
+        log('share_stop requested via daemon REST API before exit_chrome.');
+      } catch (stopError) {
+        // Close should still proceed even if share-stop is unavailable.
+        log(`share_stop before close failed, proceeding to exit_chrome: ${stopError.message}`);
+      }
+
       await callDaemonApi('/api/v1/chrome/exit', {});
-      setStatus('connected', 'Close Chrome request sent successfully.');
+      setStatus('connected', 'Stop sharing and close Chrome requests sent successfully.');
       log('exit_chrome requested via daemon REST API.');
     } catch (error) {
       setStatus('error', `Close chrome failed: "${error.message}"`);
@@ -226,7 +235,7 @@ async function init() {
         ...getRtcConfigFields(),
       };
 
-      const response = await callDaemonApi('/api/v1/action/request', request);
+      const response = await callDaemonApi('/api/v1/action/connect', request);
       const requestId = String(response.requestId || `action-${Date.now()}`);
 
       if (actionChannel) {
@@ -251,6 +260,18 @@ async function init() {
     } catch (error) {
       setStatus('error', `Take Action failed: "${error.message}"`);
       log(`take_action API failed: ${error.message}`);
+    }
+  });
+
+  el.stopShareBtn.addEventListener('click', async () => {
+    setStatus('connecting', 'Stopping sharing...');
+    try {
+      await callDaemonApi('/api/v1/share/stop', {});
+      setStatus('connected', 'Stop sharing request sent successfully. You can call Share Start again to re-share.');
+      log('share_stop requested via daemon REST API.');
+    } catch (error) {
+      setStatus('error', `Stop sharing failed: "${error.message}"`);
+      log(`share_stop API failed: ${error.message}`);
     }
   });
 }

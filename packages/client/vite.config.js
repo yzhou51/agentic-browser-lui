@@ -10,9 +10,8 @@ export default defineConfig({
   build: {
     rollupOptions: {
       input: {
-        client: path.resolve(__dirname, 'client.html'),
-        agent: path.resolve(__dirname, 'agent.html'),
-        mobile_client: path.resolve(__dirname, 'mobile_client.html'),
+        client: path.resolve(__dirname, 'public/client.html'),
+        mobile_client: path.resolve(__dirname, 'public/mobile_client.html'),
       },
     },
   },

@@ -9,15 +9,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const AUTO_SHARE_SOURCE_TITLE = String(process.env.DAEMON_AUTO_SHARE_SOURCE_TITLE || 'Agentic Browser Target').trim();
 
-function resolveDefaultExtensionDir() {
-  const configured = String(process.env.DAEMON_EXTENSION_DIR || '').trim();
-  if (configured) {
-    return configured;
-  }
-
-  return path.resolve(__dirname, '../../extension');
-}
-
 function resolveDefaultUserDataDir() {
   const configured = String(process.env.DAEMON_CHROME_USER_DATA_DIR || '').trim();
   if (configured) {
@@ -70,7 +61,6 @@ export class BrowserController {
     this.browser = null;
     this.page = null;
     this.targetPage = null;
-    this.extensionDir = resolveDefaultExtensionDir();
     this.userDataDir = resolveDefaultUserDataDir();
     this.cacheDir = resolveDefaultCacheDir();
     this.defaultLaunchArgs = [
@@ -169,14 +159,6 @@ export class BrowserController {
     fs.mkdirSync(this.userDataDir, { recursive: true });
     fs.mkdirSync(this.cacheDir, { recursive: true });
     launchArgs.push(`--disk-cache-dir=${this.cacheDir}`);
-
-    if (fs.existsSync(this.extensionDir)) {
-      launchArgs.push(`--disable-extensions-except=${this.extensionDir}`);
-      launchArgs.push(`--load-extension=${this.extensionDir}`);
-      logger.info(`Loading daemon extension from ${this.extensionDir}`);
-    } else {
-      logger.warn(`Daemon extension directory not found: ${this.extensionDir}`);
-    }
 
     logger.info(`Launching browser (headless=${this.headless})${executablePath ? ` with executable path: ${executablePath}` : ''}`);
     logger.info(`Using Chrome user data dir: ${this.userDataDir}`);

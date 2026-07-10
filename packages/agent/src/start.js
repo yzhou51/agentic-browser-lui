@@ -12,15 +12,15 @@ const rootDir = path.resolve(__dirname, '..');
 
 dotenv.config({ path: path.resolve(rootDir, '.env') });
 
-const staticHost = process.env.CLIENT_STATIC_HOST || '0.0.0.0';
-const staticPort = Number(process.env.CLIENT_STATIC_PORT || 5174);
+const staticHost = process.env.AGENT_STATIC_HOST || '0.0.0.0';
+const staticPort = Number(process.env.AGENT_STATIC_PORT || 5175);
 const signalingServer = process.env.SIGNALING_SERVER || 'http://localhost:8095';
 const clientId = process.env.CLIENT_ID || 'client-1';
 const daemonId = process.env.DAEMON_ID || 'daemon-1';
 
 const parsedRtcIceServers = parseRtcIceServersJson(process.env.RTC_ICE_SERVERS_JSON);
 if (String(process.env.RTC_ICE_SERVERS_JSON || '').trim() && !parsedRtcIceServers.length) {
-  console.warn('Ignoring invalid RTC_ICE_SERVERS_JSON in client .env.');
+  console.warn('Ignoring invalid RTC_ICE_SERVERS_JSON in agent .env.');
 }
 
 const hasExplicitIceEnv = [
@@ -45,7 +45,7 @@ const runtimeIceConfig = normalizeRtcIceOptions(
 
 const publicHost = staticHost === '0.0.0.0' ? os.hostname() : staticHost;
 
-const runtimeConfigPath = path.resolve(rootDir, 'client-demo.runtime.json');
+const runtimeConfigPath = path.resolve(rootDir, 'agent-demo.runtime.json');
 fs.writeFileSync(
   runtimeConfigPath,
   JSON.stringify(
@@ -80,13 +80,9 @@ const MIME_TYPES = {
 
 function resolveSafePath(reqPath) {
   const rawPath = decodeURIComponent(reqPath.split('?')[0]);
-  const normalized = rawPath === '/' ? '/client.html' : rawPath;
+  const normalized = rawPath === '/' ? '/agent.html' : rawPath;
   const relative = normalized.replace(/^\/+/, '');
-  const isPublicAsset =
-    relative.startsWith('vendor/') ||
-    relative === 'client.html' ||
-    relative === 'mobile_client.html';
-  const baseDir = isPublicAsset ? path.resolve(rootDir, 'public') : rootDir;
+  const baseDir = relative === 'agent.html' ? path.resolve(rootDir, 'public') : rootDir;
   const candidate = path.resolve(baseDir, relative);
   if (!candidate.startsWith(path.resolve(baseDir))) {
     return null;
@@ -133,21 +129,21 @@ const server = http.createServer((req, res) => {
 server.on('error', (error) => {
   if (error && error.code === 'EADDRINUSE') {
     console.error(
-      `Client static server failed to start: port ${staticPort} is already in use on ${staticHost}.`
+      `Agent static server failed to start: port ${staticPort} is already in use on ${staticHost}.`
     );
-    console.error('Stop the existing process or set CLIENT_STATIC_PORT to a free port.');
+    console.error('Stop the existing process or set AGENT_STATIC_PORT to a free port.');
     process.exit(1);
     return;
   }
 
-  console.error('Client static server failed to start.', error);
+  console.error('Agent static server failed to start.', error);
   process.exit(1);
 });
 
 server.listen(staticPort, staticHost, () => {
-  console.log(`Client runtime config generated: ${runtimeConfigPath}`);
-  console.log(`Client static server running: http://${staticHost}:${staticPort}`);
-  console.log(`Open demo page: http://${publicHost}:${staticPort}/client.html`);
+  console.log(`Agent runtime config generated: ${runtimeConfigPath}`);
+  console.log(`Agent static server running: http://${staticHost}:${staticPort}`);
+  console.log(`Open agent page: http://${publicHost}:${staticPort}/agent.html`);
 });
 
 let shuttingDown = false;

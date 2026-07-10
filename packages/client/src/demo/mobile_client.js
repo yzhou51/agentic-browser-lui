@@ -1,24 +1,18 @@
 import {
   AgenticBrowserClient,
   createViewerMouseCommandSender,
+  hasAnySearchParam,
+  loadClientRuntimeConfig,
+  readSearchParam,
+  readSearchParamAny,
+  readSearchPercentParam,
+  summarizeIceConfigForLog,
 } from '../sdk/index.js';
 import { normalizeRtcIceOptions, parseRtcIceServersJson } from '../sdk/rtcConfig.js';
 
-async function loadRuntimeConfig() {
-  try {
-    const response = await fetch('/client-demo.runtime.json', { cache: 'no-store' });
-    if (!response.ok) {
-      return {};
-    }
-    const config = await response.json();
-    return config && typeof config === 'object' ? config : {};
-  } catch {
-    return {};
-  }
-}
-
 async function init() {
-  const runtimeConfig = await loadRuntimeConfig();
+  const runtimeConfig = await loadClientRuntimeConfig('/client-demo.runtime.json');
+  const searchParams = new URLSearchParams(window.location.search);
   const client = new AgenticBrowserClient();
   let connected = false;
   let isMousePressed = false;
@@ -45,6 +39,7 @@ async function init() {
   let swipeStart = null;
   let swipeTarget = null; // 'video' or 'scrollbar'
   let touchCount = 0;
+  let leaveSent = false;
   const maxResolveAttempts = 5;
 
   const el = {
@@ -66,55 +61,13 @@ async function init() {
     sourceHeight: 720,
   };
 
-  function readParam(name, fallback = '') {
-    const params = new URLSearchParams(window.location.search);
-    const value = params.get(name);
-    return value && String(value).trim() ? String(value).trim() : fallback;
-  }
-
-  function readParamAny(names, fallback = '') {
-    const params = new URLSearchParams(window.location.search);
-    for (const name of names) {
-      const value = params.get(name);
-      if (value && String(value).trim()) {
-        return String(value).trim();
-      }
-    }
-    return fallback;
-  }
-
-  function readPercentParam(names, fallback = 100) {
-    const params = new URLSearchParams(window.location.search);
-    for (const name of names) {
-      const raw = params.get(name);
-      if (!raw) {
-        continue;
-      }
-
-      const parsed = Number.parseFloat(String(raw).replace('%', ''));
-      if (Number.isFinite(parsed)) {
-        return parsed;
-      }
-    }
-
-    return fallback;
-  }
-
-  function hasAnyParam(names) {
-    const params = new URLSearchParams(window.location.search);
-    return names.some((name) => {
-      const value = params.get(name);
-      return value && String(value).trim();
-    });
-  }
-
-  const envSignalingServer = readParam('signalingUrl', runtimeConfig.signalingServer || import.meta.env?.SIGNALING_SERVER || window.location.origin);
-  const envClientId = readParam('clientId', runtimeConfig.clientId || import.meta.env?.CLIENT_ID || 'client-1');
-  const envDaemonId = readParam('remoteId', runtimeConfig.daemonId || import.meta.env?.DAEMON_ID || 'daemon-1');
-  const paramStunUrls = readParamAny(['stunUrls', 'STUN_SERVER_URLS'], '');
-  const paramTurnUrls = readParamAny(['turnUrls', 'TURN_SERVER_URLS'], '');
-  const paramTurnUsername = readParamAny(['turnUsername', 'turnUserName', 'turnUser', 'TURN_USERNAME'], '');
-  const paramTurnCredential = readParamAny(['turnCredential', 'turnPassword', 'TURN_CREDENTIAL', 'TURN_PASSWORD'], '');
+  const envSignalingServer = readSearchParam(searchParams, 'signalingUrl', runtimeConfig.signalingServer || import.meta.env?.SIGNALING_SERVER || window.location.origin);
+  const envClientId = readSearchParam(searchParams, 'clientId', runtimeConfig.clientId || import.meta.env?.CLIENT_ID || 'client-1');
+  const envDaemonId = readSearchParam(searchParams, 'remoteId', runtimeConfig.daemonId || import.meta.env?.DAEMON_ID || 'daemon-1');
+  const paramStunUrls = readSearchParamAny(searchParams, ['stunUrls', 'STUN_SERVER_URLS'], '');
+  const paramTurnUrls = readSearchParamAny(searchParams, ['turnUrls', 'TURN_SERVER_URLS'], '');
+  const paramTurnUsername = readSearchParamAny(searchParams, ['turnUsername', 'turnUserName', 'turnUser', 'TURN_USERNAME'], '');
+  const paramTurnCredential = readSearchParamAny(searchParams, ['turnCredential', 'turnPassword', 'TURN_CREDENTIAL', 'TURN_PASSWORD'], '');
   const hasIceUrlParams = Boolean(
     paramStunUrls ||
     paramTurnUrls ||
@@ -134,9 +87,9 @@ async function init() {
         ? runtimeConfig.rtcIceServers
         : parseRtcIceServersJson(import.meta.env?.RTC_ICE_SERVERS_JSON)),
   });
-  const hasScaleParam = hasAnyParam(['scrollRate', 'viewScale', 'scale']);
-  const envScale = readPercentParam(['scrollRate', 'viewScale', 'scale'], 100);
-  const envFitValue = readParam('fit', '').toLowerCase();
+  const hasScaleParam = hasAnySearchParam(searchParams, ['scrollRate', 'viewScale', 'scale']);
+  const envScale = readSearchPercentParam(searchParams, ['scrollRate', 'viewScale', 'scale'], 100);
+  const envFitValue = readSearchParam(searchParams, 'fit', '').toLowerCase();
   const fitToViewport = envFitValue
     ? !(['0', 'false', 'off', 'no'].includes(envFitValue))
     : !hasScaleParam;
@@ -155,34 +108,40 @@ async function init() {
     return String(envDaemonId || '').trim();
   }
 
+  function sendLeaveMessage(reason) {
+    if (leaveSent || !connected) {
+      return;
+    }
+
+    const daemonId = getDaemonId();
+    if (!daemonId) {
+      return;
+    }
+
+    leaveSent = true;
+    client.setDaemonId(daemonId);
+    const leaveMessage = {
+      type: 'leave',
+      requestId: `leave-${Date.now()}`,
+      payload: {
+        clientId: getClientId(),
+        reason,
+      },
+    };
+
+    try {
+      void client.sendMessage(leaveMessage, daemonId).catch(() => {});
+    } catch {
+      // Keep close flow best-effort only.
+    }
+  }
+
   function getSignalingUrl() {
     return String(envSignalingServer || '').trim();
   }
 
   function getRtcConnectOptions() {
     return envIceConfig;
-  }
-
-  function summarizeIceConfigForLog(rtcOptions) {
-    const iceServers = Array.isArray(rtcOptions?.rtcIceServers) ? rtcOptions.rtcIceServers : [];
-    const stunUrls = iceServers
-      .flatMap((entry) => (Array.isArray(entry?.urls) ? entry.urls : [entry?.urls]))
-      .filter((url) => /^stuns?:/i.test(String(url || '').trim()));
-    const turnUrls = iceServers
-      .flatMap((entry) => (Array.isArray(entry?.urls) ? entry.urls : [entry?.urls]))
-      .filter((url) => /^turns?:/i.test(String(url || '').trim()));
-    const firstTurnServer = iceServers.find((entry) => {
-      const urls = Array.isArray(entry?.urls) ? entry.urls : [entry?.urls];
-      return urls.some((url) => /^turns?:/i.test(String(url || '').trim()));
-    });
-
-    return {
-      stunUrls,
-      turnUrls,
-      turnUsername: firstTurnServer?.username || '',
-      hasTurnCredential: Boolean(firstTurnServer?.credential),
-      iceServerCount: iceServers.length,
-    };
   }
 
   function setStatus(state, message) {
@@ -797,6 +756,7 @@ async function init() {
 
   client.onDisconnect = () => {
     connected = false;
+    leaveSent = false;
     resolveSent = false;
     resolvePromise = null;
     resolveAttempts = 0;
@@ -1443,6 +1403,14 @@ async function init() {
     }
   }, { passive: true });
 
+  window.addEventListener('pagehide', () => {
+    sendLeaveMessage('pagehide');
+  });
+
+  window.addEventListener('beforeunload', () => {
+    sendLeaveMessage('beforeunload');
+  });
+
   setupNativeScrollbarGestureGuard();
   setupHorizontalWheelPan();
   setupVerticalWheelPan();
@@ -1476,6 +1444,7 @@ async function init() {
       ...rtcOptions,
     });
     connected = true;
+    leaveSent = false;
     resolveAttempts = 0;
     clearResolveRetryTimer();
     setStatus('connected', `Connected to signaling for daemon "${getDaemonId()}". Waiting for data channel...`);

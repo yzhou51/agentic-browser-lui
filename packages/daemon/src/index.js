@@ -7,7 +7,7 @@ import { BrowserController } from './daemon/browserController.js';
 import { AgentControlBridge } from './daemon/agentControlBridge.js';
 import { CommandProcessor } from './daemon/commandProcessor.js';
 import { createLogger } from './logger.js';
-import { startStaticServer } from './staticServer.js';
+import { startStaticServer } from './server.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -4,7 +4,7 @@ Client subproject includes:
 
 - SDK: `src/sdk/AgenticBrowserClient.js`
 - Viewer helpers: `src/sdk/viewerUtils.js`
-- Demo UI: Vite app in `client.html` and `src/demo/client.js`
+- Demo UI: pages in `public/client.html` and `public/mobile_client.html`, with logic in `src/demo/client.js`
 
 ## Dev
 
@@ -26,9 +26,9 @@ Runtime defaults are generated from `.env` into `client-demo.runtime.json`.
 
 Pages:
 
-- `client.html`: remote client viewer/input page.
-- `mobile_client.html`: mobile-first client page with dedicated keyboard-launch button.
-- `agent.html`: daemon REST action page (launch/close Chrome, open target, send Take Action request).
+- `public/client.html`: remote client viewer/input page.
+- `public/mobile_client.html`: mobile-first client page with dedicated keyboard-launch button.
+- Agent page is now split into `../agent/public/agent.html` and served by the `@agentic-browser/agent` package.
 
 Default static server listen host is `0.0.0.0`, default port is `5174`.
 
@@ -48,7 +48,7 @@ Environment values used by static mode:
 ## Alternative Dev Mode
 
 - `pnpm dev:client` from workspace root
-- `pnpm dev` from workspace root (runs daemon and client dev servers together)
+- `pnpm dev` from workspace root (runs daemon, client, and agent together)
 
 ## SDK quick usage
 
@@ -89,8 +89,4 @@ These helpers were extracted from the demo so other client UIs can reuse the sam
 - The client page (`src/demo/client.js`) now focuses on viewer/input control only.
 - Client and agent forms expose STUN/TURN fields directly after signaling configuration, and those defaults can be generated into `client-demo.runtime.json`.
 - The mobile page (`src/demo/mobile_client.js`) is isolated from desktop flow and adds an explicit `Open Keyboard` button for phone text input.
-- Agent REST actions are extracted to `agent.html` (`src/demo/agent.js`):
-  - launch Chrome with custom path/params,
-  - open target URL,
-  - send Take Action request to daemon,
-  - close page and exit Chrome.
+- Agent REST actions are now maintained in the standalone `@agentic-browser/agent` package.

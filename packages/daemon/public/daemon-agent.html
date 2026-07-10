@@ -65,39 +65,11 @@
         padding: 12px;
       }
       .status { color: var(--accent); }
-      .target-indicator {
-        margin-top: 8px;
-        padding: 8px 10px;
-        border: 1px solid #334155;
-        border-radius: 8px;
-        background: #0b1220;
-        color: var(--muted);
-        font-size: 13px;
-      }
-      .target-indicator strong {
-        color: var(--fg);
-      }
-      .target-row {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-      }
-      .target-row input {
-        flex: 1;
-      }
-      .target-frame {
-        margin-top: 10px;
-        width: 100%;
-        height: 560px;
-        border: 1px solid #334155;
-        border-radius: 8px;
-        background: #0b1020;
-      }
     </style>
   </head>
   <body>
     <div class="container">
-      <h1>Agentic Daemon Peer Agent</h1>
+      <h1>Agentic-Browser Daemon</h1>
       <div class="card">
         <label for="uid">Daemon ID</label>
         <input id="uid" value="daemon-1" />
@@ -119,22 +91,6 @@
           <button id="disconnect">Disconnect</button>
         </div>
         <p class="status" id="status">Idle.</p>
-      </div>
-      <div class="card">
-        <h3>Target Page (Separate Tab)</h3>
-        <label for="targetUrl">Target URL</label>
-        <div class="target-row">
-          <input id="targetUrl" value="/target-demo.html" />
-          <button id="openTarget">Open Target Tab</button>
-          <button id="openTargetTab">Open In New Tab</button>
-          <button id="bindLastActiveTarget">Bind Last Active Tab</button>
-          <button id="checkExtension">Check Extension</button>
-        </div>
-        <p class="status" id="extensionStatus">Extension status: not checked.</p>
-        <div class="target-indicator" id="targetIndicator">
-          <strong>Controlled tab:</strong> none
-        </div>
-        <iframe id="targetFrame" class="target-frame" title="Target Page" src="/target-demo.html"></iframe>
       </div>
       <div class="card">
         <h3>Data Channel Messages</h3>
