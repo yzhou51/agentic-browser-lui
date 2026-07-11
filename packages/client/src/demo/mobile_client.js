@@ -44,6 +44,7 @@ async function init() {
 
   const el = {
     status: document.getElementById('status'),
+    finishBtn: document.getElementById('finishBtn'),
     remotePanel: document.querySelector('.mobile-remote-panel'),
     remoteVideo: document.getElementById('remoteVideo'),
     hScrollOverlay: document.getElementById('hScrollOverlay'),
@@ -134,6 +135,29 @@ async function init() {
     } catch {
       // Keep close flow best-effort only.
     }
+  }
+
+  async function sendFinishMessage(reason = 'user_click') {
+    const daemonId = getDaemonId();
+    if (!daemonId) {
+      throw new Error('daemon id is missing.');
+    }
+    if (!connected) {
+      throw new Error('not connected to daemon.');
+    }
+
+    client.setDaemonId(daemonId);
+    await client.sendMessage(
+      {
+        type: 'finish',
+        requestId: `finish-${Date.now()}`,
+        payload: {
+          clientId: getClientId(),
+          reason,
+        },
+      },
+      daemonId
+    );
   }
 
   function getSignalingUrl() {
@@ -1410,6 +1434,19 @@ async function init() {
   window.addEventListener('beforeunload', () => {
     sendLeaveMessage('beforeunload');
   });
+
+  if (el.finishBtn) {
+    el.finishBtn.addEventListener('click', async () => {
+      try {
+        await sendFinishMessage('button_click');
+        setStatus('connected', `Finish sent to daemon "${getDaemonId()}".`);
+        log(`Finish sent to daemon "${getDaemonId()}".`);
+      } catch (error) {
+        setStatus('error', `Finish failed: ${error.message}`);
+        log(`Finish failed: ${error.message}`);
+      }
+    });
+  }
 
   setupNativeScrollbarGestureGuard();
   setupHorizontalWheelPan();

@@ -7,6 +7,16 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
+function readPositiveInt(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
+}
+
+const clientMessageTimeoutSeconds = readPositiveInt(process.env.DAEMON_CLIENT_MESSAGE_TIMEOUT_SECONDS, 120);
+
 export const config = {
   signalingServer: process.env.SIGNALING_SERVER || 'http://localhost:8095',
   daemonId: process.env.DAEMON_ID || 'daemon-1',
@@ -20,4 +30,6 @@ export const config = {
   browserHeadless: (process.env.BROWSER_HEADLESS || 'false').toLowerCase() === 'true',
   daemonLogLevel: process.env.DAEMON_LOG_LEVEL || process.env.LOG_LEVEL || 'info',
   daemonLogFile: process.env.DAEMON_LOG_FILE || '/var/log/agent-browser-daemon.log',
+  clientMessageTimeoutMs: clientMessageTimeoutSeconds * 1000,
+  timeoutSnapshotDir: process.env.DAEMON_TIMEOUT_SNAPSHOT_DIR || path.resolve(__dirname, '../log/snapshots'),
 };

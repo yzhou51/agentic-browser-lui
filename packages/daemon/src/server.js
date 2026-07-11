@@ -117,6 +117,60 @@ function withIceDefaults(payload = {}, defaults = {}) {
   };
 }
 
+function parseBooleanFlag(value, fallback = false) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function parseFiniteNumber(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function normalizeSnapshotOptions(source = {}, query = null) {
+  const fullPage = parseBooleanFlag(
+    source.fullPage ?? (query ? query.get('fullPage') : undefined),
+    false
+  );
+
+  const clipX = parseFiniteNumber(source.clipX ?? source.x ?? (query ? query.get('clipX') ?? query.get('x') : undefined));
+  const clipY = parseFiniteNumber(source.clipY ?? source.y ?? (query ? query.get('clipY') ?? query.get('y') : undefined));
+  const clipWidth = parseFiniteNumber(source.clipWidth ?? source.width ?? (query ? query.get('clipWidth') ?? query.get('width') : undefined));
+  const clipHeight = parseFiniteNumber(source.clipHeight ?? source.height ?? (query ? query.get('clipHeight') ?? query.get('height') : undefined));
+
+  const hasClip =
+    clipX !== null &&
+    clipY !== null &&
+    clipWidth !== null &&
+    clipHeight !== null &&
+    clipWidth > 0 &&
+    clipHeight > 0;
+
+  return {
+    fullPage,
+    clip: hasClip
+      ? {
+          x: clipX,
+          y: clipY,
+          width: clipWidth,
+          height: clipHeight,
+        }
+      : null,
+  };
+}
+
 export function startStaticServer({
   rootDir,
   browserModuleDir,
@@ -130,6 +184,8 @@ export function startStaticServer({
   onAgentEvent,
   isAgentOnline,
   bootstrapAgentBridge,
+  getLatestSavedSnapshot,
+  startSession,
 }) {
   async function ensureAgentBridgeOnline() {
     if (isAgentOnline()) {
@@ -294,6 +350,24 @@ export function startStaticServer({
       return;
     }
 
+    if (req.url === '/api/v1/session/start' && req.method === 'POST') {
+      withCorsHeaders(res);
+      if (typeof startSession !== 'function') {
+        writeJson(res, 501, { ok: false, error: 'Session start is not configured.' });
+        return;
+      }
+
+      readJsonBody(req)
+        .then(async (payload) => {
+          const result = await startSession(payload || {});
+          writeJson(res, 200, result);
+        })
+        .catch((error) => {
+          writeJson(res, 400, { ok: false, error: error.message || 'Session start failed.' });
+        });
+      return;
+    }
+
     if (req.url === '/api/v1/chrome/exit' && req.method === 'POST') {
       withCorsHeaders(res);
       submitCommand({ type: 'exit_chrome' })
@@ -377,6 +451,103 @@ export function startStaticServer({
         })
         .catch((error) => {
           writeJson(res, 400, { ok: false, error: error.message || 'Close page failed.' });
+        });
+      return;
+    }
+
+    if (req.url.startsWith('/api/v1/page/snapshot') && (req.method === 'GET' || req.method === 'POST')) {
+      withCorsHeaders(res);
+
+      const tryWriteSavedSnapshot = async () => {
+        if (typeof getLatestSavedSnapshot !== 'function') {
+          return false;
+        }
+
+        const saved = await Promise.resolve(getLatestSavedSnapshot());
+        const savedPath = String(saved?.path || saved || '').trim();
+        if (!savedPath) {
+          return false;
+        }
+
+        let stats;
+        try {
+          stats = await fs.promises.stat(savedPath);
+        } catch {
+          return false;
+        }
+
+        if (!stats.isFile()) {
+          return false;
+        }
+
+        const imageBuffer = await fs.promises.readFile(savedPath);
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Content-Length': imageBuffer.length,
+          'Cache-Control': 'no-store',
+          'X-Snapshot-Source': 'saved',
+          'X-Snapshot-File': path.basename(savedPath),
+          'X-Snapshot-Target-Url': String(saved?.targetUrl || ''),
+        });
+        res.end(imageBuffer);
+        return true;
+      };
+
+      const handleSnapshot = async (payload = {}, { allowSavedFallback = false } = {}) => {
+        const requestUrl = new URL(req.url, 'http://localhost');
+        const options = normalizeSnapshotOptions(payload, requestUrl.searchParams);
+        let result;
+
+        try {
+          result = await submitCommand({
+            type: 'capture_target_snapshot',
+            payload: options,
+          });
+        } catch (error) {
+          if (allowSavedFallback) {
+            const wroteSavedSnapshot = await tryWriteSavedSnapshot();
+            if (wroteSavedSnapshot) {
+              return;
+            }
+          }
+          throw error;
+        }
+
+        const imageBase64 = String(result?.imageBase64 || '');
+        if (!imageBase64) {
+          if (allowSavedFallback) {
+            const wroteSavedSnapshot = await tryWriteSavedSnapshot();
+            if (wroteSavedSnapshot) {
+              return;
+            }
+          }
+          writeJson(res, 500, { ok: false, error: 'Snapshot capture returned empty image.' });
+          return;
+        }
+
+        const imageBuffer = Buffer.from(imageBase64, 'base64');
+        res.writeHead(200, {
+          'Content-Type': String(result?.mimeType || 'image/png'),
+          'Content-Length': imageBuffer.length,
+          'Cache-Control': 'no-store',
+          'X-Snapshot-Target-Url': String(result?.targetPage?.url || ''),
+        });
+        res.end(imageBuffer);
+      };
+
+      if (req.method === 'GET') {
+        Promise.resolve()
+          .then(() => handleSnapshot({}, { allowSavedFallback: true }))
+          .catch((error) => {
+            writeJson(res, 400, { ok: false, error: error.message || 'Snapshot failed.' });
+          });
+        return;
+      }
+
+      readJsonBody(req)
+        .then((payload) => handleSnapshot(payload))
+        .catch((error) => {
+          writeJson(res, 400, { ok: false, error: error.message || 'Snapshot failed.' });
         });
       return;
     }

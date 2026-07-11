@@ -206,6 +206,19 @@
         cursor: grab;
       }
 
+      .mobile-finish-btn {
+        position: absolute;
+        top: 14px;
+        right: 14px;
+        z-index: 2;
+        padding: 8px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        background: linear-gradient(180deg, #fcd34d, var(--accent));
+        color: #1f1400;
+        font-weight: 700;
+      }
+
       .keyboard-fab.is-dragging {
         cursor: grabbing;
       }
@@ -247,6 +260,7 @@
     <main class="mobile-app">
       <section class="panel mobile-remote-panel">
         <p id="status" class="status mobile-status-chip" data-state="connecting" aria-live="polite">Booting...</p>
+        <button id="finishBtn" class="mobile-finish-btn" type="button">Finish</button>
         <div class="mobile-video-scroll">
           <video id="remoteVideo" class="mobile-video" autoplay playsinline muted tabindex="0"></video>
         </div>

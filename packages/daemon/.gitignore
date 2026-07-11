@@ -2,3 +2,4 @@
 .chrome-cache
 .log
 *.log
+log/*

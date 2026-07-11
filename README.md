@@ -129,9 +129,22 @@ Daemon now exposes REST APIs on the static server (default `http://localhost:878
 - `POST /api/v1/chrome/launch`
   - Launches (or reuses) the daemon browser runtime through Puppeteer.
   - Optional body can include Chrome executable path and launch args.
+- `POST /api/v1/session/start`
+  - Unified session flow API:
+    - Launches Chrome if needed.
+    - Opens/re-opens daemon-agent page and target page.
+    - Connects signaling and waits for client `Resolve`.
+    - After resolve, daemon-agent publishes shared target and command replay continues over OWT data channel.
+    - Applies timeout-based snapshot/cleanup for this session.
 - `POST /api/v1/page/open`
   - Opens or navigates the daemon-controlled target page.
   - For agent workflow, this also prepares daemon-agent session context.
+- `GET /api/v1/page/snapshot`
+  - Captures current target page as `image/png` for agent analysis.
+  - Optional query params: `fullPage=true`, `clipX`, `clipY`, `clipWidth`, `clipHeight`.
+- `POST /api/v1/page/snapshot`
+  - Same snapshot API with JSON body options.
+  - Example body: `{ "fullPage": true }` or clipped region fields.
 - `POST /api/v1/action/connect`
   - Primary "Take Action" endpoint.
   - Updates daemon-agent session (IDs, signaling, ICE), performs signaling connect-only.

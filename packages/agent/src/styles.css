@@ -100,6 +100,17 @@ label {
   color: var(--muted);
 }
 
+.inline-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inline-control input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+}
+
 input,
 textarea {
   background: #060b17;
@@ -184,6 +195,17 @@ button {
   max-height: 260px;
   overflow-y: auto;
   padding: 10px;
+}
+
+#snapshotImage {
+  width: 100%;
+  max-height: 340px;
+  object-fit: contain;
+  display: none;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  border: 1px solid #1e2b43;
+  background: #050913;
 }
 
 @media (max-width: 1024px) {

@@ -51,11 +51,15 @@ The same static server also exposes browser modules from `src/daemon/` under `/d
 - `DAEMON_STATIC_PORT` (default: `8788`)
 - `DAEMON_LOG_LEVEL` (default: `info`, options: `debug`, `info`, `warn`, `error`, `silent`)
 - `DAEMON_LOG_FILE` (default: `/var/log/agent-browser-daemon.log`)
+- `DAEMON_CLIENT_MESSAGE_TIMEOUT_SECONDS` (default: `120`)
+- `DAEMON_TIMEOUT_SNAPSHOT_DIR` (default: `log/snapshots` under daemon package)
 - `BROWSER_HEADLESS` (default: `false`)
 - `PUPPETEER_BROWSER_CHANNEL` (default: `chrome`)
 - `PUPPETEER_EXECUTABLE_PATH` (optional)
 
 Daemon launches Chrome through Puppeteer and controls a dedicated target page directly.
+
+When no peer message is received from the current client within timeout window, daemon captures a full-page PNG snapshot of the current target page, saves it to snapshot directory, then enqueues disconnect and closes the controlled target page for cleanup.
 
 ## REST API (Agent Workflow)
 
@@ -81,6 +85,33 @@ Base URL defaults to `http://localhost:8788`.
     }
     ```
 
+- `POST /api/v1/session/start`
+  - Unified session-start endpoint:
+    - Launch Chrome if not running.
+    - Open/re-open daemon-agent page and target page.
+    - Connect daemon-agent to signaling server.
+    - Wait for client connection and `resolve` message.
+    - Continue command replay over data channel after resolve.
+    - Arm timeout snapshot flow for this session.
+  - Body example:
+
+    ```json
+    {
+      "daemonId": "daemon-1",
+      "clientId": "client-1",
+      "targetUrl": "https://www.zhihu.com/signin?next=%2F",
+      "timeout": 120,
+      "sessionId": "session-001",
+      "signalingServer": "http://localhost:8095",
+      "stunUrls": "stun:example.com:3478",
+      "turnUrls": "turn:example.com:3478?transport=udp,turn:example.com:3478?transport=tcp",
+      "turnUsername": "username",
+      "turnCredential": "password",
+      "chrome": "",
+      "chromeParams": "[{\"name\":\"--proxy-server\",\"value\":\"http://127.0.0.1:8888\"}]"
+    }
+    ```
+
 - `POST /api/v1/page/open`
   - Enqueues target open on daemon-agent page.
   - Body example:
@@ -89,6 +120,23 @@ Base URL defaults to `http://localhost:8788`.
     {
       "name": "zhihu",
       "url": "https://www.zhihu.com/signin?next=%2F"
+    }
+    ```
+
+- `GET /api/v1/page/snapshot`
+  - Captures the current target page and returns `image/png` directly.
+  - If target page is already closed, daemon returns the most recently saved timeout snapshot when available.
+  - Optional query params:
+    - `fullPage=true` to capture full scrollable page.
+    - `clipX`, `clipY`, `clipWidth`, `clipHeight` to capture a specific region.
+
+- `POST /api/v1/page/snapshot`
+  - Same as GET, with options in JSON body.
+  - Body example:
+
+    ```json
+    {
+      "fullPage": true
     }
     ```
 
@@ -165,6 +213,7 @@ From this package folder:
 - `node src/index.js open --url https://example.com`
 - `node src/index.js close-page`
 - `node src/index.js exit-chrome`
+- `node src/index.js session-start --daemon-id daemon-1 --client-id client-1 --target-url https://example.com`
 
 ## Notes
 

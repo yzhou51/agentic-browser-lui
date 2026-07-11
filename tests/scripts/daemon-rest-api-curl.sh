@@ -34,6 +34,23 @@ echo "== status =="
 curl -sS "${DAEMON_API_URL}/api/v1/status"
 echo
 
+echo "== unified session start (launch + open + connect + wait resolve) =="
+json_post '/api/v1/session/start' "$(cat <<JSON
+{
+  \"daemonId\": \"${DAEMON_ID}\",
+  \"clientId\": \"${CLIENT_ID}\",
+  \"targetUrl\": \"${TARGET_URL}\",
+  \"signalingServer\": \"${SIGNALING_SERVER}\",
+  \"stunUrls\": \"${STUN_SERVER_URLS}\",
+  \"turnUrls\": \"${TURN_SERVER_URLS}\",
+  \"turnUsername\": \"${TURN_USERNAME}\",
+  \"turnCredential\": \"${TURN_CREDENTIAL}\",
+  \"chrome\": \"${CHROME_BIN}\",
+  \"chromeParams\": ${CHROME_PARAMS}
+}
+JSON
+)"
+
 echo "== launch chrome =="
 json_post '/api/v1/chrome/launch' "$(cat <<JSON
 {

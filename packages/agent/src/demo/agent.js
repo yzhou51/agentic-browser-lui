@@ -54,17 +54,26 @@ async function init() {
     turnUsername: document.getElementById('turnUsername'),
     turnCredential: document.getElementById('turnCredential'),
     daemonApiUrl: document.getElementById('daemonApiUrl'),
+    sessionId: document.getElementById('sessionId'),
+    sessionTimeout: document.getElementById('sessionTimeout'),
     chromePath: document.getElementById('chromePath'),
     chromeParams: document.getElementById('chromeParams'),
     targetUrl: document.getElementById('targetUrl'),
+    snapshotFullPage: document.getElementById('snapshotFullPage'),
     status: document.getElementById('status'),
+    startSessionBtn: document.getElementById('startSessionBtn'),
     launchChromeBtn: document.getElementById('launchChromeBtn'),
     closeChromeBtn: document.getElementById('closeChromeBtn'),
     openUrlBtn: document.getElementById('openUrlBtn'),
     takeActionBtn: document.getElementById('takeActionBtn'),
+    snapshotBtn: document.getElementById('snapshotBtn'),
     stopShareBtn: document.getElementById('stopShareBtn'),
+    snapshotMeta: document.getElementById('snapshotMeta'),
+    snapshotImage: document.getElementById('snapshotImage'),
     logs: document.getElementById('logs'),
   };
+
+  let lastSnapshotObjectUrl = '';
 
   const envSignalingServer = runtimeConfig.signalingServer || import.meta.env?.SIGNALING_SERVER || window.location.origin;
   const envClientId = runtimeConfig.clientId || import.meta.env?.CLIENT_ID;
@@ -158,6 +167,67 @@ async function init() {
     return payload;
   }
 
+  async function callDaemonSnapshot(path, body) {
+    const endpoint = `${normalizeDaemonApiBase(el.daemonApiUrl.value)}${path}`;
+    const isGet = body === undefined;
+    let response;
+
+    try {
+      response = await fetch(endpoint, {
+        method: isGet ? 'GET' : 'POST',
+        headers: isGet
+          ? undefined
+          : {
+              'Content-Type': 'application/json',
+            },
+        body: isGet ? undefined : JSON.stringify(body),
+      });
+    } catch (error) {
+      throw new Error(
+        `Cannot reach daemon API at ${endpoint}. ` +
+        'Check daemon is running, Daemon Server address is correct, and browser can access that host/port. ' +
+        `Original error: ${error.message}`
+      );
+    }
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || 'Snapshot API call failed.');
+    }
+
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('image/png')) {
+      throw new Error(`Snapshot API returned unexpected content-type: ${contentType || 'unknown'}`);
+    }
+
+    const blob = await response.blob();
+    const targetUrl = response.headers.get('X-Snapshot-Target-Url') || '';
+    return { blob, targetUrl };
+  }
+
+  function applySnapshotResult(blob, targetUrl) {
+    if (lastSnapshotObjectUrl) {
+      URL.revokeObjectURL(lastSnapshotObjectUrl);
+    }
+
+    lastSnapshotObjectUrl = URL.createObjectURL(blob);
+    el.snapshotImage.src = lastSnapshotObjectUrl;
+    el.snapshotImage.style.display = 'block';
+
+    const now = new Date();
+    const sizeKb = (blob.size / 1024).toFixed(1);
+    const fileName = `target-snapshot-${now.toISOString().replace(/[:.]/g, '-')}.png`;
+    const targetText = targetUrl ? ` target=${targetUrl}` : '';
+
+    el.snapshotMeta.textContent = `Latest snapshot: ${fileName} (${sizeKb} KB).${targetText}`;
+    log(`snapshot captured: ${fileName}, size=${sizeKb} KB${targetText}`);
+
+    const downloadLink = document.createElement('a');
+    downloadLink.href = lastSnapshotObjectUrl;
+    downloadLink.download = fileName;
+    downloadLink.click();
+  }
+
   el.launchChromeBtn.addEventListener('click', async () => {
     setStatus('connecting', 'Launching Chrome...');
     try {
@@ -171,6 +241,53 @@ async function init() {
     } catch (error) {
       setStatus('error', `Launch chrome failed: "${error.message}"`);
       log(`launch_chrome API failed: ${error.message}`);
+    }
+  });
+
+  el.startSessionBtn.addEventListener('click', async () => {
+    setStatus('connecting', 'Starting unified session...');
+    try {
+      const rtc = getRtcConfigFields();
+      const chromeParams = parseChromeParamsInput(el.chromeParams.value);
+      const payload = {
+        daemonId: String(el.daemonId.value || '').trim(),
+        clientId: String(el.clientId.value || '').trim(),
+        targetUrl: String(el.targetUrl.value || '').trim(),
+        signalingServer: String(el.signalingUrl.value || '').trim(),
+        stunUrls: rtc.stunUrls,
+        turnUrls: rtc.turnUrls,
+        turnUsername: rtc.turnUsername,
+        turnCredential: rtc.turnCredential,
+        chrome: String(el.chromePath.value || '').trim(),
+        chromeParams,
+      };
+
+      const sessionId = String(el.sessionId?.value || '').trim();
+      if (sessionId) {
+        payload.sessionId = sessionId;
+      }
+
+      const timeoutText = String(el.sessionTimeout?.value || '').trim();
+      if (timeoutText) {
+        const timeoutValue = Number(timeoutText);
+        if (!Number.isFinite(timeoutValue) || timeoutValue <= 0) {
+          throw new Error('Session timeout must be a positive number (seconds).');
+        }
+        payload.timeout = Math.floor(timeoutValue);
+      }
+
+      const response = await callDaemonApi('/api/v1/session/start', payload);
+      const finalSessionId = String(response.sessionId || sessionId || '');
+      if (finalSessionId && el.sessionId) {
+        el.sessionId.value = finalSessionId;
+      }
+
+      setStatus('connected', 'Session started and waiting flow completed (connected + resolve received).');
+      log(`session_start requested via daemon REST API. sessionId=${finalSessionId || 'n/a'}`);
+      log(`session_start commandIds=${JSON.stringify(response.commandIds || [])}`);
+    } catch (error) {
+      setStatus('error', `Start session failed: "${error.message}"`);
+      log(`session_start API failed: ${error.message}`);
     }
   });
 
@@ -272,6 +389,20 @@ async function init() {
     } catch (error) {
       setStatus('error', `Stop sharing failed: "${error.message}"`);
       log(`share_stop API failed: ${error.message}`);
+    }
+  });
+
+  el.snapshotBtn.addEventListener('click', async () => {
+    setStatus('connecting', 'Capturing target page snapshot...');
+    try {
+      const useFullPage = Boolean(el.snapshotFullPage?.checked);
+      const requestBody = useFullPage ? { fullPage: true } : {};
+      const { blob, targetUrl } = await callDaemonSnapshot('/api/v1/page/snapshot', requestBody);
+      applySnapshotResult(blob, targetUrl);
+      setStatus('connected', 'Snapshot captured successfully.');
+    } catch (error) {
+      setStatus('error', `Snapshot failed: "${error.message}"`);
+      log(`snapshot API failed: ${error.message}`);
     }
   });
 }

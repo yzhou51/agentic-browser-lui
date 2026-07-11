@@ -51,6 +51,14 @@ export class CommandProcessor {
           await this.browser.closeTargetPage();
           return { ok: true, message: 'Target page closed.', bridge: 'puppeteer' };
         }
+        case 'capture_target_snapshot': {
+          const snapshot = await this.browser.captureTargetSnapshot(payload || {});
+          return {
+            ok: true,
+            bridge: 'puppeteer',
+            ...snapshot,
+          };
+        }
         case 'dispatch_target_command':
           return await this.browser.dispatchTargetCommand(payload.command || {});
         case 'mouse_move': {

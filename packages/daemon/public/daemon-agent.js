@@ -244,8 +244,9 @@ async function loadRuntimeConfig() {
 
       try {
         const command = JSON.parse(e.message);
+        const normalizedType = String(command?.type || '').trim().toLowerCase();
 
-        if (command?.type === 'resolve') {
+        if (normalizedType === 'resolve') {
           console.log('[daemon-agent] resolve message received', {
             origin: e.origin,
             requestId: command.requestId,
@@ -438,12 +439,17 @@ async function loadRuntimeConfig() {
       case 'key_press':
       case 'extension_ping':
       case 'leave':
+      case 'finish':
         if (type !== 'open_url' && type !== 'close_page' && type !== 'extension_ping') {
           console.debug(`[daemon-agent] handleCommand ${type}`, { payload });
         }
         if (type === 'leave') {
           appendMessage(`leave received from client ${payload?.clientId || 'unknown'} (${payload?.reason || 'unspecified'})`);
           return { ok: true, message: 'leave received' };
+        }
+        if (type === 'finish') {
+          appendMessage(`finish received from client ${payload?.clientId || 'unknown'} (${payload?.reason || 'unspecified'})`);
+          return { ok: true, message: 'finish received' };
         }
         try {
           return await forwardCommandViaPuppeteer(command);

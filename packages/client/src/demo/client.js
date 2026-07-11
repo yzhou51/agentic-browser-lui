@@ -25,6 +25,7 @@ async function init() {
     status: document.getElementById('status'),
     connectBtn: document.getElementById('connectBtn'),
     disconnectBtn: document.getElementById('disconnectBtn'),
+    finishBtn: document.getElementById('finishBtn'),
     resolveBtn: document.getElementById('resolveBtn'),
     actionRequestMessage: document.getElementById('actionRequestMessage'),
     remoteVideo: document.getElementById('remoteVideo'),
@@ -118,6 +119,29 @@ async function init() {
     } catch {
       // Keep close flow best-effort only.
     }
+  }
+
+  async function sendFinishMessage(reason = 'user_click') {
+    const daemonId = getActiveDaemonId();
+    if (!daemonId) {
+      throw new Error('daemon id is missing.');
+    }
+    if (!connected) {
+      throw new Error('not connected to daemon.');
+    }
+
+    client.setDaemonId(daemonId);
+    await client.sendMessage(
+      {
+        type: 'finish',
+        requestId: `finish-${Date.now()}`,
+        payload: {
+          clientId: String(el.clientId?.value || '').trim(),
+          reason,
+        },
+      },
+      daemonId
+    );
   }
 
   function log(message) {
@@ -319,6 +343,17 @@ async function init() {
     updateActionRequestView();
     setStatus('idle', 'Disconnected. Not connected to daemon.');
     log('Disconnected.');
+  });
+
+  el.finishBtn.addEventListener('click', async () => {
+    try {
+      await sendFinishMessage('button_click');
+      setStatus('connected', `Finish sent to daemon "${getActiveDaemonId()}".`);
+      log(`Finish sent to daemon "${getActiveDaemonId()}".`);
+    } catch (error) {
+      setStatus('error', `Finish failed: ${error.message}`);
+      log(`Finish failed: ${error.message}`);
+    }
   });
 
   window.addEventListener('pagehide', () => {
