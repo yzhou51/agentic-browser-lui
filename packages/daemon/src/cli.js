@@ -4,7 +4,7 @@ export function buildCli({ getState, submitCommand }) {
   const program = new Command();
 
   program
-    .name('agentic-daemon')
+    .name('awe-daemon')
     .description('Local CLI for daemon control')
     .version('0.1.0');
 

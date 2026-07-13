@@ -27,7 +27,7 @@ Runtime defaults are generated from `.env` into `client-demo.runtime.json`.
 Pages:
 
 - `public/client.html`: remote client viewer/input page.
-- `public/mobile_client.html`: mobile-first client page with dedicated keyboard-launch button.
+- `public/mobile_client.html`: mobile-first client page with dedicated keyboard-launch button and a Finish action pinned at the opposite bottom corner.
 - Agent page is now split into `../agent/public/agent.html` and served by the `@agentic-browser/agent` package.
 
 Default static server listen host is `0.0.0.0`, default port is `5174`.
@@ -89,4 +89,5 @@ These helpers were extracted from the demo so other client UIs can reuse the sam
 - The client page (`src/demo/client.js`) now focuses on viewer/input control only.
 - Client and agent forms expose STUN/TURN fields directly after signaling configuration, and those defaults can be generated into `client-demo.runtime.json`.
 - The mobile page (`src/demo/mobile_client.js`) is isolated from desktop flow and adds an explicit `Open Keyboard` button for phone text input.
+- Mobile status chip in `public/mobile_client.html` is hidden by default for customer-facing demos and can be re-enabled for debugging by adding `debug-status` class to `body`.
 - Agent REST actions are now maintained in the standalone `@agentic-browser/agent` package.

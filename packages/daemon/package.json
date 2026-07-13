@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "main": "src/index.js",
+  "bin": {
+    "awe-daemon": "src/index.js"
+  },
   "scripts": {
     "dev": "node src/index.js",
     "start": "node src/index.js"

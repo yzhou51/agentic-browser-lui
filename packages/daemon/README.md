@@ -59,7 +59,7 @@ The same static server also exposes browser modules from `src/daemon/` under `/d
 
 Daemon launches Chrome through Puppeteer and controls a dedicated target page directly.
 
-When no peer message is received from the current client within timeout window, daemon captures a full-page PNG snapshot of the current target page, saves it to snapshot directory, then enqueues disconnect and closes the controlled target page for cleanup.
+When no peer message is received from the current client within timeout window (tool mode), daemon captures a full-page PNG snapshot of the current target page, saves it to snapshot directory, and marks session stage/status as `finish` / `timeout`.
 
 ## REST API (Agent Workflow)
 
@@ -90,7 +90,7 @@ Base URL defaults to `http://localhost:8788`.
     - Launch Chrome if not running.
     - Open/re-open daemon-agent page and target page.
     - Connect daemon-agent to signaling server.
-    - Wait for client connection and `resolve` message.
+    - Wait for client connection and `resolve` message, or accept an early `finish` as terminal completion.
     - Continue command replay over data channel after resolve.
     - Arm timeout snapshot flow for this session.
   - Body example:
@@ -214,6 +214,52 @@ From this package folder:
 - `node src/index.js close-page`
 - `node src/index.js exit-chrome`
 - `node src/index.js session-start --daemon-id daemon-1 --client-id client-1 --target-url https://example.com`
+
+Tool-mode CLI (awe-daemon):
+
+- `node src/index.js --daemon-id daemon-1 --client-id client-1 --target-url https://example.com`
+
+When started in tool mode, daemon records and updates `activeSession.stage` and `activeSession.status` in `GET /api/v1/status`.
+
+Stages:
+
+- `start`
+- `lauch_chrome`
+- `open_daemon_agent_page`
+- `open_target_page`
+- `connect_to_signalServer`
+- `wait_client_resolve`
+- `user_interaction`
+- `finish`
+
+Tool-mode optional params:
+
+- `--timeout <seconds>`
+- `--session-id <id>`
+- `--signaling-server <url>`
+- `--stun-urls <csv>`
+- `--turn-urls <csv>`
+- `--turn-username <value>`
+- `--turn-credential <value>`
+- `--chrome <path>`
+- `--chrome-params <json-string-array>`
+- `--json-compact` (print single-line JSON output for machine parsing)
+
+Exit behavior in tool mode:
+
+- On timeout: capture snapshot and return timeout status.
+- On `finish` message from client: capture snapshot and return success status.
+- A client `finish` can complete the session even if `resolve` was not received yet.
+- In both cases, tool-mode exits after emitting the final JSON result.
+
+Tool-mode result payload includes:
+
+- `snapshots`: ordered list of captured snapshots for the session, each with `type`, `timestamp`, and `path`.
+
+Exit code notes for automation:
+
+- Direct `node src/index.js ...` returns process exit code (`0` on success, `124` on timeout, `1` on error).
+- When started through `pnpm --filter ... start -- ...`, pnpm wraps non-zero exit code and reports command failure, while JSON result is still printed.
 
 ## Notes
 

@@ -63,6 +63,11 @@
         max-width: 100%;
         backdrop-filter: blur(8px);
         background: rgba(5, 9, 19, 0.72);
+        display: none;
+      }
+
+      body.debug-status .mobile-status-chip {
+        display: block;
       }
 
       .mobile-video {
@@ -208,8 +213,8 @@
 
       .mobile-finish-btn {
         position: absolute;
-        top: 14px;
-        right: 14px;
+        left: 16px;
+        bottom: 16px;
         z-index: 2;
         padding: 8px 12px;
         border-radius: 999px;

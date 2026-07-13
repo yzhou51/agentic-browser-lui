@@ -88,16 +88,12 @@ participant Agent
 participant Daemon
 participant Client
 
-Agent->>Daemon: POST /api/v1/chrome/launch
-Daemon->>Daemon: Launch (or reuse) Puppeteer Chrome
-
-Agent->>Daemon: POST /api/v1/page/open (targetUrl)
-Daemon->>Daemon: Open daemon-agent page + controlled target page
+Agent->>Daemon: POST /api/v1/session/start
+Daemon->>Daemon: launch_chrome + open_daemon_agent_page + open_target_page
 
 rect rgb(219, 234, 254)
-Note over Agent,Daemon: Take Action
-Agent->>Daemon: POST /api/v1/action/connect
-Daemon->>Daemon: Update session + connect daemon-agent to signaling (connect-only)
+Note over Agent,Daemon: Session Bootstrap
+Daemon->>Daemon: connect_to_signalServer + wait_client_resolve
 end
 Daemon-->>Agent: Status/query APIs reflect bridge + runtime state
 
@@ -111,6 +107,13 @@ loop User interaction session
 Client->>Daemon: Send mouse/keyboard/text commands over data channel
 Daemon->>Daemon: Replay commands on controlled target page (Puppeteer)
 Daemon-->>Client: Send command_result messages
+end
+
+alt Timeout
+Daemon->>Daemon: Capture timeout snapshot and mark stage=finish,status=timeout
+else Finish message
+Client->>Daemon: Send Finish over OWT data channel
+Daemon->>Daemon: Capture finish snapshot and mark stage=finish,status=success
 end
 
 Client->>Daemon: Send Leave when client page closes/navigates away (best-effort)
@@ -133,9 +136,9 @@ Daemon now exposes REST APIs on the static server (default `http://localhost:878
   - Unified session flow API:
     - Launches Chrome if needed.
     - Opens/re-opens daemon-agent page and target page.
-    - Connects signaling and waits for client `Resolve`.
+    - Connects signaling and waits for client `Resolve` (or early `Finish` terminal event).
     - After resolve, daemon-agent publishes shared target and command replay continues over OWT data channel.
-    - Applies timeout-based snapshot/cleanup for this session.
+    - Applies timeout-based snapshot and finish/timeout stage transition for this session.
 - `POST /api/v1/page/open`
   - Opens or navigates the daemon-controlled target page.
   - For agent workflow, this also prepares daemon-agent session context.
@@ -160,6 +163,13 @@ Daemon now exposes REST APIs on the static server (default `http://localhost:878
   - Exits Puppeteer-launched browser process and clears active browser/page state.
 - `GET /api/v1/status`
   - Returns daemon runtime snapshot (browser/page state, target status, and bridge state).
+  - Includes `activeSession.stage` and `activeSession.status` when using tool-mode session flow.
+  - Includes session diagnostics such as resolve/finish timestamps and snapshot metadata.
+
+Daemon tool mode (`awe-daemon`) can be started with CLI params directly, for example:
+
+- `node packages/daemon/src/index.js --daemon-id daemon-1 --client-id client-1 --target-url https://example.com`
+- Add `--json-compact` for single-line JSON output that is easy for agentic tooling to parse.
 
 Internally, daemon-agent page polls `/api/v1/agent/commands` and reports execution via `/api/v1/agent/events`.
 

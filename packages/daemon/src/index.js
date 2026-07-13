@@ -95,6 +95,105 @@ function createSessionId() {
   return `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function normalizeId(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeToolFlagName(name) {
+  const raw = String(name || '').trim();
+  if (!raw) {
+    return '';
+  }
+  const base = raw.replace(/^-+/, '');
+  return base.replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+}
+
+function parseAweDaemonToolOptions(argv = []) {
+  if (!Array.isArray(argv) || !argv.length) {
+    return null;
+  }
+
+  if (!argv.some((arg) => String(arg || '').startsWith('--'))) {
+    return null;
+  }
+
+  const options = {};
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = String(argv[index] || '');
+    if (!token.startsWith('--')) {
+      continue;
+    }
+
+    const key = normalizeToolFlagName(token);
+    if (!key) {
+      continue;
+    }
+
+    const next = index + 1 < argv.length ? String(argv[index + 1] || '') : '';
+    if (next && !next.startsWith('--')) {
+      options[key] = next;
+      index += 1;
+      continue;
+    }
+
+    options[key] = true;
+  }
+
+  const payload = {
+    daemonId: options.daemonId,
+    clientId: options.clientId,
+    targetUrl: options.targetUrl,
+  };
+
+  if (!payload.daemonId || !payload.clientId || !payload.targetUrl) {
+    return null;
+  }
+
+  if (options.timeout !== undefined) {
+    payload.timeout = Number(options.timeout);
+  }
+  if (options.sessionId !== undefined) {
+    payload.sessionId = String(options.sessionId || '').trim();
+  }
+  if (options.signalingServer !== undefined) {
+    payload.signalingServer = String(options.signalingServer || '').trim();
+  }
+  if (options.stunUrls !== undefined) {
+    payload.stunUrls = options.stunUrls;
+  }
+  if (options.turnUrls !== undefined) {
+    payload.turnUrls = options.turnUrls;
+  }
+  if (options.turnUsername !== undefined) {
+    payload.turnUsername = options.turnUsername;
+  }
+  if (options.turnCredential !== undefined) {
+    payload.turnCredential = options.turnCredential;
+  }
+  if (options.chrome !== undefined) {
+    payload.chrome = options.chrome;
+  }
+  if (options.chromeParams !== undefined) {
+    payload.chromeParams = options.chromeParams;
+  }
+  if (options.jsonCompact !== undefined) {
+    payload.jsonCompact = Boolean(options.jsonCompact);
+  }
+
+  return payload;
+}
+
+function emitToolResult(data, { compact = false, isError = false } = {}) {
+  const text = compact
+    ? JSON.stringify(data)
+    : JSON.stringify(data, null, 2);
+  if (isError) {
+    console.error(text);
+    return;
+  }
+  console.log(text);
+}
+
 let clientMessageTimeoutHandle = null;
 let currentClientMessageTimeoutMs = Number(config.clientMessageTimeoutMs || 120000);
 let latestTimeoutSnapshot = {
@@ -102,19 +201,104 @@ let latestTimeoutSnapshot = {
   targetUrl: '',
   capturedAt: 0,
 };
+const sessionSnapshots = [];
+const SESSION_STAGES = {
+  START: 'start',
+  LAUNCH_CHROME: 'lauch_chrome',
+  OPEN_DAEMON_AGENT_PAGE: 'open_daemon_agent_page',
+  OPEN_TARGET_PAGE: 'open_target_page',
+  CONNECT_TO_SIGNAL_SERVER: 'connect_to_signalServer',
+  WAIT_CLIENT_RESOLVE: 'wait_client_resolve',
+  USER_INTERACTION: 'user_interaction',
+  FINISH: 'finish',
+};
 const activeSession = {
   id: '',
   daemonId: '',
   clientId: '',
   targetUrl: '',
   timeoutMs: currentClientMessageTimeoutMs,
+  stage: SESSION_STAGES.START,
+  status: 'idle',
+  statusMessage: '',
+  outcome: '',
   connected: false,
   connectedAt: 0,
   resolved: false,
   startedAt: 0,
   lastResolveAt: 0,
+  lastResolveFrom: '',
+  lastFinishAt: 0,
+  lastFinishFrom: '',
+  completedAt: 0,
+  snapshots: sessionSnapshots,
 };
 const sessionReadyWaiters = [];
+const sessionCompletionWaiters = [];
+
+function updateSessionProgress(stage, status, statusMessage = '') {
+  activeSession.stage = stage;
+  activeSession.status = status;
+  activeSession.statusMessage = statusMessage;
+}
+
+function notifySessionCompletionWaiters(result) {
+  while (sessionCompletionWaiters.length) {
+    const waiter = sessionCompletionWaiters.shift();
+    clearTimeout(waiter.timer);
+    waiter.resolve(result);
+  }
+}
+
+function completeSession(outcome, statusMessage = '') {
+  if (activeSession.completedAt) {
+    return;
+  }
+
+  clearClientMessageTimeout();
+  activeSession.outcome = outcome;
+  activeSession.completedAt = Date.now();
+  updateSessionProgress(SESSION_STAGES.FINISH, outcome, statusMessage);
+  notifySessionCompletionWaiters({
+    outcome,
+    status: activeSession.status,
+    stage: activeSession.stage,
+    statusMessage,
+    completedAt: activeSession.completedAt,
+  });
+}
+
+function waitForSessionCompletion(timeoutMs = 0) {
+  if (activeSession.completedAt) {
+    return Promise.resolve({
+      outcome: activeSession.outcome,
+      status: activeSession.status,
+      stage: activeSession.stage,
+      statusMessage: activeSession.statusMessage,
+      completedAt: activeSession.completedAt,
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    const waiter = {
+      resolve,
+      reject,
+      timer: null,
+    };
+
+    if (timeoutMs > 0) {
+      waiter.timer = setTimeout(() => {
+        const index = sessionCompletionWaiters.indexOf(waiter);
+        if (index !== -1) {
+          sessionCompletionWaiters.splice(index, 1);
+        }
+        reject(new Error('Timed out waiting for session completion.'));
+      }, timeoutMs);
+    }
+
+    sessionCompletionWaiters.push(waiter);
+  });
+}
 
 function notifySessionReadyWaiters() {
   if (!(activeSession.connected && activeSession.resolved)) {
@@ -128,6 +312,7 @@ function notifySessionReadyWaiters() {
       sessionId: activeSession.id,
       connectedAt: activeSession.connectedAt,
       resolveAt: activeSession.lastResolveAt,
+      resolveFrom: activeSession.lastResolveFrom,
     });
   }
 }
@@ -138,6 +323,7 @@ function waitForSessionReady(timeoutMs) {
       sessionId: activeSession.id,
       connectedAt: activeSession.connectedAt,
       resolveAt: activeSession.lastResolveAt,
+      resolveFrom: activeSession.lastResolveFrom,
     });
   }
 
@@ -160,16 +346,106 @@ function waitForSessionReady(timeoutMs) {
   });
 }
 
-function rememberTimeoutSnapshot(snapshot = {}) {
+function waitForSessionReadyOrCompletion(timeoutMs = 0) {
+  if (activeSession.connected && activeSession.resolved) {
+    return Promise.resolve({
+      kind: 'ready',
+      data: {
+        sessionId: activeSession.id,
+        connectedAt: activeSession.connectedAt,
+        resolveAt: activeSession.lastResolveAt,
+        resolveFrom: activeSession.lastResolveFrom,
+      },
+    });
+  }
+
+  if (activeSession.completedAt) {
+    return Promise.resolve({
+      kind: 'completion',
+      data: {
+        outcome: activeSession.outcome,
+        status: activeSession.status,
+        stage: activeSession.stage,
+        statusMessage: activeSession.statusMessage,
+        completedAt: activeSession.completedAt,
+      },
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const finalize = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearInterval(probeTimer);
+      clearTimeout(timeoutTimer);
+      resolve(result);
+    };
+
+    const probe = () => {
+      if (activeSession.connected && activeSession.resolved) {
+        finalize({
+          kind: 'ready',
+          data: {
+            sessionId: activeSession.id,
+            connectedAt: activeSession.connectedAt,
+            resolveAt: activeSession.lastResolveAt,
+            resolveFrom: activeSession.lastResolveFrom,
+          },
+        });
+        return;
+      }
+
+      if (activeSession.completedAt) {
+        finalize({
+          kind: 'completion',
+          data: {
+            outcome: activeSession.outcome,
+            status: activeSession.status,
+            stage: activeSession.stage,
+            statusMessage: activeSession.statusMessage,
+            completedAt: activeSession.completedAt,
+          },
+        });
+      }
+    };
+
+    const probeTimer = setInterval(probe, 100);
+    const timeoutTimer = timeoutMs > 0
+      ? setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearInterval(probeTimer);
+        reject(new Error('Timed out waiting for session readiness or completion.'));
+      }, timeoutMs)
+      : null;
+
+    probe();
+  });
+}
+
+function rememberTimeoutSnapshot(snapshot = {}, type = 'timeout') {
   const snapshotPath = String(snapshot.outputPath || '').trim();
   if (!snapshotPath) {
     return;
   }
 
+  const capturedAt = Date.now();
+  sessionSnapshots.push({
+    type: String(type || 'timeout').trim() || 'timeout',
+    timestamp: new Date(capturedAt).toISOString(),
+    path: snapshotPath,
+  });
+
   latestTimeoutSnapshot = {
     path: snapshotPath,
     targetUrl: String(snapshot?.targetPage?.url || '').trim(),
-    capturedAt: Date.now(),
+    capturedAt,
   };
 }
 
@@ -246,7 +522,7 @@ function armClientMessageTimeout(reason = 'init', timeoutMsOverride = null) {
         outputDir: config.timeoutSnapshotDir,
         fileNamePrefix: `timeout-${session.clientId || 'client'}`,
       });
-      rememberTimeoutSnapshot(snapshot);
+      rememberTimeoutSnapshot(snapshot, 'timeout');
       logger.info('Timeout snapshot saved.', {
         outputPath: snapshot.outputPath,
         targetUrl: snapshot?.targetPage?.url || '',
@@ -257,28 +533,8 @@ function armClientMessageTimeout(reason = 'init', timeoutMsOverride = null) {
       });
     }
 
-    try {
-      const requestId = `timeout-${Date.now()}`;
-      agentBridge.enqueue('disconnect', {
-        reason: 'client_message_timeout',
-        requestId,
-      });
-      logger.info('Enqueued daemon-agent disconnect due to client message timeout.', {
-        requestId,
-      });
-    } catch (error) {
-      logger.warn('Failed to enqueue daemon-agent disconnect on timeout.', {
-        error: error.message,
-      });
-    }
-
-    try {
-      await browser.closeTargetPage();
-      logger.info('Closed target page due to client message timeout.');
-    } catch (error) {
-      logger.warn('Failed to close target page on timeout cleanup.', {
-        error: error.message,
-      });
+    if (activeSession.id) {
+      completeSession('timeout', `Session timed out after ${Math.max(1, Math.floor(timeoutMs / 1000))} seconds.`);
     }
   }, timeoutMs);
 }
@@ -320,6 +576,29 @@ async function startSessionWorkflow(payload = {}) {
   const chromeParamsRaw = payload.chromeParams ?? process.env.DAEMON_SESSION_START_CHROME_PARAMS_JSON ?? '[]';
   const chromeParams = parseChromeParamsValue(chromeParamsRaw);
 
+  activeSession.id = sessionId;
+  activeSession.daemonId = daemonId;
+  activeSession.clientId = clientId;
+  activeSession.targetUrl = targetUrl;
+  activeSession.timeoutMs = timeoutMs;
+  activeSession.stage = SESSION_STAGES.START;
+  activeSession.status = 'running';
+  activeSession.statusMessage = 'session initialized';
+  activeSession.outcome = '';
+  activeSession.connected = false;
+  activeSession.connectedAt = 0;
+  activeSession.resolved = false;
+  activeSession.startedAt = Date.now();
+  activeSession.lastResolveAt = 0;
+  activeSession.lastResolveFrom = '';
+  activeSession.lastFinishAt = 0;
+  activeSession.lastFinishFrom = '';
+  activeSession.completedAt = 0;
+  sessionSnapshots.length = 0;
+
+  updateSessionProgress(SESSION_STAGES.START, 'running', 'starting session flow');
+
+  updateSessionProgress(SESSION_STAGES.LAUNCH_CHROME, 'running', 'launching chrome');
   const launchResult = await commands.handle({
     type: 'launch_chrome',
     payload: {
@@ -357,10 +636,12 @@ async function startSessionWorkflow(payload = {}) {
     daemonAgentUrl.searchParams.set('turnCredential', turnCredential);
   }
 
+  updateSessionProgress(SESSION_STAGES.OPEN_DAEMON_AGENT_PAGE, 'running', 'opening daemon-agent page');
   await commands.handle({
     type: 'open_url',
     payload: { url: daemonAgentUrl.toString() },
   });
+  updateSessionProgress(SESSION_STAGES.OPEN_TARGET_PAGE, 'running', 'opening target page');
   const openTargetResult = await commands.handle({
     type: 'open_target_page',
     payload: {
@@ -371,9 +652,11 @@ async function startSessionWorkflow(payload = {}) {
 
   const online = await waitForAgentOnline(12000);
   if (!online) {
+    updateSessionProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'error', 'daemon-agent bridge did not come online in time');
     throw new Error('daemon-agent bridge did not come online in time.');
   }
 
+  updateSessionProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'running', 'connecting to signaling server');
   const requestId = `${sessionId}-connect`;
   const setSessionCommand = agentBridge.enqueue('set_session', {
     daemonId,
@@ -400,20 +683,33 @@ async function startSessionWorkflow(payload = {}) {
     forceReconnect: true,
   });
 
-  activeSession.id = sessionId;
-  activeSession.daemonId = daemonId;
-  activeSession.clientId = clientId;
-  activeSession.targetUrl = targetUrl;
-  activeSession.timeoutMs = timeoutMs;
-  activeSession.connected = false;
-  activeSession.connectedAt = 0;
-  activeSession.resolved = false;
-  activeSession.startedAt = Date.now();
-  activeSession.lastResolveAt = 0;
-
   armClientMessageTimeout('session_start', timeoutMs);
 
-  const waitResult = await waitForSessionReady(timeoutMs);
+  updateSessionProgress(SESSION_STAGES.WAIT_CLIENT_RESOLVE, 'running', 'waiting for client resolve');
+  let completionDuringStart = null;
+  let waitResult = null;
+  try {
+    const readyOrCompletion = await waitForSessionReadyOrCompletion(timeoutMs + 500);
+    if (readyOrCompletion.kind === 'ready') {
+      waitResult = readyOrCompletion.data;
+      updateSessionProgress(SESSION_STAGES.USER_INTERACTION, 'running', 'user interaction phase');
+    } else {
+      completionDuringStart = readyOrCompletion.data;
+      logger.info('Session completed before resolve.', {
+        sessionId,
+        outcome: completionDuringStart.outcome,
+        status: completionDuringStart.status,
+      });
+    }
+  } catch (error) {
+    if (!/Timed out waiting for session readiness or completion/i.test(String(error?.message || ''))) {
+      throw error;
+    }
+    logger.warn('Session resolve wait timed out; awaiting timeout completion status.', {
+      sessionId,
+      timeoutSeconds,
+    });
+  }
 
   return {
     ok: true,
@@ -431,14 +727,16 @@ async function startSessionWorkflow(payload = {}) {
     openTarget: openTargetResult,
     commandIds: [setSessionCommand.id, disconnectCommand.id, connectCommand.id],
     wait: {
-      connected: true,
-      resolveReceived: true,
-      connectedAt: waitResult.connectedAt,
-      resolveAt: waitResult.resolveAt,
+      connected: Boolean(waitResult?.connectedAt || activeSession.connected),
+      resolveReceived: Boolean(waitResult?.resolveAt || activeSession.resolved),
+      connectedAt: waitResult?.connectedAt || activeSession.connectedAt || 0,
+      resolveAt: waitResult?.resolveAt || activeSession.lastResolveAt || 0,
+      resolveFrom: waitResult?.resolveFrom || activeSession.lastResolveFrom || '',
     },
+    completedDuringStart: completionDuringStart,
     flow: {
       interaction: 'Client sends mouse/keyboard/text over data channel; daemon-agent replays to Puppeteer target.',
-      timeoutSnapshot: `Timeout (${timeoutSeconds}s) captures snapshot and performs cleanup.`,
+      timeoutSnapshot: `Timeout (${timeoutSeconds}s) captures snapshot and returns timeout status.`,
     },
   };
 }
@@ -456,7 +754,9 @@ const cli = buildCli({
   submitCommand: (command) => commands.handle(command),
 });
 
-if (process.argv.length > 2) {
+const toolModePayload = parseAweDaemonToolOptions(process.argv.slice(2));
+
+if (process.argv.length > 2 && !toolModePayload) {
   cli.parse(process.argv);
 } else {
   const publicDir = path.resolve(__dirname, '../public');
@@ -519,7 +819,7 @@ if (process.argv.length > 2) {
       return agentBridge.enqueue(type, payload);
     },
     getAgentCommandsAfter: (after) => agentBridge.getCommandsAfter(after),
-    onAgentEvent: (event) => {
+    onAgentEvent: async (event) => {
       const kind = String(event?.kind || '').trim();
       if (kind === 'heartbeat') {
         agentBridge.mergeState(event.state || {});
@@ -544,10 +844,14 @@ if (process.argv.length > 2) {
             sharedTrackLabel: String(event?.state?.sharedTrackLabel || ''),
           });
         }
-        if (event.status === 'connected' && String(event?.state?.clientId || '').trim() === String(activeSession.clientId || '').trim()) {
-          activeSession.connected = true;
-          activeSession.connectedAt = Date.now();
-          notifySessionReadyWaiters();
+        if (event.status === 'connected') {
+          const connectedClientId = normalizeId(event?.state?.clientId);
+          const expectedClientId = normalizeId(activeSession.clientId);
+          if (connectedClientId && expectedClientId && connectedClientId === expectedClientId) {
+            activeSession.connected = true;
+            activeSession.connectedAt = Date.now();
+            notifySessionReadyWaiters();
+          }
         }
         agentBridge.markSeen(event.status || null);
         return;
@@ -560,8 +864,10 @@ if (process.argv.length > 2) {
         const rawMessage = String(event?.message || '');
         let parsedType = '';
         let parsedRequestId = '';
+        let parsedPayload = null;
         try {
           const parsed = JSON.parse(rawMessage);
+          parsedPayload = parsed;
           parsedType = String(parsed?.type || '').trim().toLowerCase();
           parsedRequestId = String(parsed?.requestId || '');
         } catch {
@@ -575,9 +881,16 @@ if (process.argv.length > 2) {
           message: rawMessage,
         });
 
+        const payloadClientId = String(
+          parsedPayload?.payload?.clientId || parsedPayload?.clientId || ''
+        ).trim();
+
         const messageOrigin = String(event?.origin || '').trim();
         const expectedClientId = String(session.clientId || '').trim();
-        if (messageOrigin && expectedClientId && messageOrigin === expectedClientId) {
+        const originMatchesSessionClient = normalizeId(messageOrigin) && normalizeId(expectedClientId) && normalizeId(messageOrigin) === normalizeId(expectedClientId);
+        const payloadMatchesSessionClient = normalizeId(payloadClientId) && normalizeId(expectedClientId) && normalizeId(payloadClientId) === normalizeId(expectedClientId);
+
+        if (originMatchesSessionClient || payloadMatchesSessionClient) {
           armClientMessageTimeout('peer_message', currentClientMessageTimeoutMs);
           logger.debug('Client message timeout reset from peer message.', {
             origin: messageOrigin,
@@ -586,13 +899,54 @@ if (process.argv.length > 2) {
         }
 
         if (parsedType === 'resolve') {
-          if (messageOrigin && String(activeSession.clientId || '').trim() === messageOrigin) {
+          const expectedActiveClientId = normalizeId(activeSession.clientId);
+          const originMatchesActiveClient = normalizeId(messageOrigin) && expectedActiveClientId && normalizeId(messageOrigin) === expectedActiveClientId;
+          const payloadMatchesActiveClient = normalizeId(payloadClientId) && expectedActiveClientId && normalizeId(payloadClientId) === expectedActiveClientId;
+          if (originMatchesActiveClient || payloadMatchesActiveClient) {
             activeSession.resolved = true;
             activeSession.lastResolveAt = Date.now();
+            activeSession.lastResolveFrom = messageOrigin || payloadClientId;
             notifySessionReadyWaiters();
+            updateSessionProgress(SESSION_STAGES.USER_INTERACTION, 'running', 'resolve received, user interaction phase');
           }
           logger.info('RESOLVE_RECEIVED', {
             origin: String(event?.origin || ''),
+            payloadClientId,
+            requestId: parsedRequestId,
+            message: rawMessage,
+          });
+        } else if (parsedType === 'finish') {
+          const expectedActiveClientId = normalizeId(activeSession.clientId);
+          const originMatchesActiveClient = normalizeId(messageOrigin) && expectedActiveClientId && normalizeId(messageOrigin) === expectedActiveClientId;
+          const payloadMatchesActiveClient = normalizeId(payloadClientId) && expectedActiveClientId && normalizeId(payloadClientId) === expectedActiveClientId;
+          const earlyFinishForActiveSession = Boolean(activeSession.id && !activeSession.completedAt);
+          const acceptedFinish = Boolean(originMatchesActiveClient || payloadMatchesActiveClient || earlyFinishForActiveSession);
+
+          if (acceptedFinish) {
+            activeSession.lastFinishAt = Date.now();
+            activeSession.lastFinishFrom = messageOrigin || payloadClientId;
+
+            try {
+              const snapshot = await browser.saveTargetSnapshotToFile({
+                fullPage: true,
+                outputDir: config.timeoutSnapshotDir,
+                fileNamePrefix: `finish-${activeSession.clientId || 'client'}`,
+              });
+              rememberTimeoutSnapshot(snapshot, 'finish');
+            } catch (error) {
+              logger.warn('Failed to capture finish snapshot.', {
+                error: error.message,
+              });
+            }
+
+            completeSession('success', 'Finish message received. Session completed successfully.');
+          }
+
+          logger.info('FINISH_RECEIVED', {
+            origin: String(event?.origin || ''),
+            payloadClientId,
+            acceptedFinish,
+            earlyFinishForActiveSession,
             requestId: parsedRequestId,
             message: rawMessage,
           });
@@ -657,14 +1011,18 @@ if (process.argv.length > 2) {
 
   let shuttingDown = false;
 
-  armClientMessageTimeout('runtime_start');
+  if (!toolModePayload) {
+    armClientMessageTimeout('runtime_start');
+  }
 
-  const shutdown = async () => {
+  const shutdown = async (exitCode = null) => {
     if (shuttingDown) {
       return;
     }
+    const code = Number.isInteger(exitCode) ? exitCode : (Number.isInteger(process.exitCode) ? process.exitCode : 0);
     shuttingDown = true;
     clearClientMessageTimeout();
+    await browser.closeTargetPage();
     await browser.closeBrowser();
     await new Promise((resolve, reject) => {
       server.close((error) => {
@@ -675,13 +1033,50 @@ if (process.argv.length > 2) {
         }
       });
     });
-    process.exit(0);
+    process.exit(code);
   };
-  process.once('SIGINT', shutdown);
-  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', () => shutdown(null));
+  process.once('SIGTERM', () => shutdown(null));
 
   logger.info(`Using external OWT signaling server: ${session.signalingServer}`);
   logger.info(`Daemon static server running: http://${config.staticServerHost}:${config.staticServerPort}`);
   logger.info(`Open daemon peer page: ${daemonAgentUrl}`);
   logger.info(`Daemon log level: ${config.daemonLogLevel}`);
+
+  if (toolModePayload) {
+    logger.info('awe-daemon tool mode started', {
+      daemonId: toolModePayload.daemonId,
+      clientId: toolModePayload.clientId,
+      targetUrl: toolModePayload.targetUrl,
+      timeout: toolModePayload.timeout,
+      sessionId: toolModePayload.sessionId,
+    });
+
+    try {
+      const startResult = await startSessionWorkflow(toolModePayload);
+      const completion = await waitForSessionCompletion(Math.max(activeSession.timeoutMs + 60000, activeSession.timeoutMs));
+      const ok = completion.outcome === 'success';
+      const result = {
+        ok,
+        stage: activeSession.stage,
+        status: activeSession.status,
+        message: completion.statusMessage || (ok ? 'Session completed successfully.' : 'Session completed with timeout.'),
+        snapshots: sessionSnapshots,
+        start: startResult,
+        completion,
+      };
+
+      emitToolResult(result, { compact: Boolean(toolModePayload.jsonCompact) });
+      await shutdown(ok ? 0 : 124);
+    } catch (error) {
+      updateSessionProgress(activeSession.stage || SESSION_STAGES.START, 'error', error.message);
+      emitToolResult({
+        ok: false,
+        stage: activeSession.stage,
+        status: activeSession.status,
+        message: error.message,
+      }, { compact: Boolean(toolModePayload.jsonCompact), isError: true });
+      await shutdown(1);
+    }
+  }
 }
