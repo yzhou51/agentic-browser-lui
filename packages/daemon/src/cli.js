@@ -47,6 +47,7 @@ export function buildCli({ getState, submitCommand }) {
     .option('--turn-urls <csv>', 'comma-separated turn urls')
     .option('--turn-username <value>', 'turn username')
     .option('--turn-credential <value>', 'turn credential')
+    .option('--remote-debugging-port <port>', 'remote debugging port used for attach-first mode')
     .option('--chrome <path>', 'chrome executable path override')
     .option('--chrome-params <json>', 'chrome params as JSON string array')
     .action(async (opts) => {
@@ -77,6 +78,9 @@ export function buildCli({ getState, submitCommand }) {
       }
       if (opts.turnCredential) {
         payload.turnCredential = opts.turnCredential;
+      }
+      if (opts.remoteDebuggingPort !== undefined) {
+        payload.remoteDebuggingPort = Number(opts.remoteDebuggingPort);
       }
       if (opts.chrome) {
         payload.chrome = opts.chrome;

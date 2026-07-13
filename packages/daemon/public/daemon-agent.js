@@ -36,6 +36,12 @@ async function loadRuntimeConfig() {
     return currentTargetUrl;
   }
 
+  function isRemoteDevtoolsMode() {
+    const runtimeMode = String(runtimeConfig?.runtimeMode || '').trim().toLowerCase();
+    const browserConnectionMode = String(runtimeConfig?.browserConnectionMode || '').trim().toLowerCase();
+    return runtimeMode === 'remote-devtools' || browserConnectionMode === 'attached';
+  }
+
   function setTargetUrl(url) {
     const normalized = normalizeTargetUrl(url);
     currentTargetUrl = normalized;
@@ -269,8 +275,9 @@ async function loadRuntimeConfig() {
               });
             }
 
+            let preparedTarget = null;
             try {
-              const preparedTarget = await submitLocalDaemonCommand({ type: 'prepare_share_target', payload: {} });
+              preparedTarget = await submitLocalDaemonCommand({ type: 'prepare_share_target', payload: {} });
               console.log('[daemon-agent] prepared share target before capture', preparedTarget);
               appendMessage(`share target prepared: ${JSON.stringify(preparedTarget)}`);
             } catch (prepareError) {
@@ -281,7 +288,12 @@ async function loadRuntimeConfig() {
               appendMessage(`prepare share target failed: ${prepareError.message}`);
             }
 
-            await shareScreen({ automated: true });
+            await shareScreen({
+              automated: true,
+              targetHints: {
+                targetUrl: String(preparedTarget?.targetPage?.url || ''),
+              },
+            });
             if (!screenStream) {
               throw new Error('share failed or was cancelled by user.');
             }
@@ -506,24 +518,39 @@ async function loadRuntimeConfig() {
     }
 
     let mediaStream;
+    let shareMethod = 'displaymedia';
     let manualPromptShown = false;
+    if (automated && isRemoteDevtoolsMode()) {
+      console.log('[daemon-agent] remote-devtools mode: using direct getDisplayMedia auto-select path');
+      appendMessage('remote-devtools mode: using direct getDisplayMedia auto-select path');
+    }
+
     try {
-      if (!automated) {
+      if (!mediaStream && !automated) {
         manualPromptShown = true;
         setStatus('Please select the Puppeteer target tab in the browser picker to share it.');
       }
 
-      console.log('[daemon-agent] requesting getDisplayMedia', {
-        automated,
-        manualPromptShown,
-        controlTargetMode,
-      });
-      mediaStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { displaySurface: 'browser' },
-        audio: false,
-      });
+      if (!mediaStream) {
+        if (automated) {
+          manualPromptShown = !isRemoteDevtoolsMode();
+          setStatus(isRemoteDevtoolsMode()
+            ? 'Using getDisplayMedia auto-select in remote-devtools mode.'
+            : 'Please select the Puppeteer target tab in the browser picker to share it.');
+        }
+
+        console.log('[daemon-agent] requesting getDisplayMedia', {
+          automated,
+          manualPromptShown,
+          controlTargetMode,
+        });
+        mediaStream = await navigator.mediaDevices.getDisplayMedia({
+          video: { displaySurface: 'browser' },
+          audio: false,
+        });
+      }
     } catch (error) {
-      console.log('[daemon-agent] getDisplayMedia failed', {
+      console.log('[daemon-agent] share capture failed', {
         automated,
         manualPromptShown,
         error: error.message,
@@ -538,6 +565,7 @@ async function loadRuntimeConfig() {
       manualPromptShown,
       sharedTrackLabel,
       controlTargetMode,
+      shareMethod,
     });
     if (!looksLikeCorrectSharedTarget(sharedTrackLabel)) {
       const expectedTarget = getTargetUrl() || 'unknown target';
@@ -585,8 +613,8 @@ async function loadRuntimeConfig() {
 
     setStatus(
       sharedTrackLabel
-        ? `Screen stream published (${sharedTrackLabel}).`
-        : 'Screen stream published.'
+        ? `Screen stream published via ${shareMethod} (${sharedTrackLabel}).`
+        : `Screen stream published via ${shareMethod}.`
     );
 
     await postAgentEvent({
@@ -598,6 +626,7 @@ async function loadRuntimeConfig() {
         controlTargetMode,
         targetUrl: getTargetUrl(),
         sharedTrackLabel,
+        shareMethod,
       },
     });
   }

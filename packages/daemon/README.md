@@ -56,8 +56,48 @@ The same static server also exposes browser modules from `src/daemon/` under `/d
 - `BROWSER_HEADLESS` (default: `false`)
 - `PUPPETEER_BROWSER_CHANNEL` (default: `chrome`)
 - `PUPPETEER_EXECUTABLE_PATH` (optional)
+- `DAEMON_CHROME_REMOTE_DEBUGGING_PORT` (optional)
 
-Daemon launches Chrome through Puppeteer and controls a dedicated target page directly.
+Daemon launches Chrome through Puppeteer in detached-friendly mode and controls a dedicated target page directly.
+If a remote-debugging port is configured and a Chrome instance is already running on that port, daemon attaches to it instead of launching a new browser process.
+
+Daemon now uses two runtime modes:
+
+- `remote-devtools` mode:
+  - In tool mode, activated only when `--remote-debugging-port` is passed and attach succeeds.
+  - On daemon exit, Chrome and target page are preserved.
+  - Automated resolve uses direct `getDisplayMedia` auto-select path (extension `tabCapture` is skipped).
+- `putter` mode:
+  - Activated when `--remote-debugging-port` is not passed in tool mode, or when remote-devtools attach fails (fallback).
+  - On daemon exit, daemon closes target page and Chrome.
+
+For automatic share to work reliably when attaching to an existing Chrome, that Chrome should be started with the same capture-related flags and profile assumptions used by daemon launch:
+
+- `--remote-debugging-port=<DAEMON_CHROME_REMOTE_DEBUGGING_PORT>`
+- `--allow-http-screen-capture`
+- `--auto-select-tab-capture-source-by-title=Agentic Browser Target`
+- `--auto-select-desktop-capture-source=Agentic Browser Target`
+- `--use-fake-ui-for-media-stream` (optional; recommended for test-only automation)
+- A writable `--user-data-dir` (same profile daemon is configured to use)
+
+Ubuntu example (launch attached Chrome manually first):
+
+```bash
+/usr/bin/google-chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir="/tmp/daemon-chrome-profile" \
+  --allow-http-screen-capture \
+  --auto-select-tab-capture-source-by-title="Agentic Browser Target" \
+  --auto-select-desktop-capture-source="Agentic Browser Target"
+```
+
+Then start daemon tool-mode with matching remote debugging port:
+
+```bash
+node src/index.js --daemon-id daemon-1 --client-id client-1 --target-url https://example.com --timeout 120 --json-compact --remote-debugging-port=9222
+```
+
+If existing Chrome is missing these flags/policies, daemon can still operate with it, but screen share may require manual picker confirmation instead of fully automated selection.
 
 When no peer message is received from the current client within timeout window (tool mode), daemon captures a full-page PNG snapshot of the current target page, saves it to snapshot directory, and marks session stage/status as `finish` / `timeout`.
 
@@ -171,6 +211,9 @@ Base URL defaults to `http://localhost:8788`.
 - `POST /api/v1/share/stop`
   - Stops active sharing by enqueueing a daemon-agent disconnect.
   - After stop completes, call `POST /api/v1/share/start` again to trigger a fresh share.
+- `GET /api/v1/share/preflight`
+  - Returns daemon-side share readiness diagnostics for automatic share.
+  - Includes runtime mode (`remote-devtools` or `putter`), browser connection mode (`launched` or `attached`), required flag checks, and warnings when auto-share reliability may be reduced.
 - `POST /api/v1/page/close`
   - Enqueues target close on daemon-agent page.
 - `POST /api/v1/chrome/exit`
@@ -221,16 +264,71 @@ Tool-mode CLI (awe-daemon):
 
 When started in tool mode, daemon records and updates `activeSession.stage` and `activeSession.status` in `GET /api/v1/status`.
 
+### Tool-mode flags
+
+- Required:
+  - `--daemon-id <id>`
+  - `--client-id <id>`
+  - `--target-url <url>`
+- Optional:
+  - `--timeout <seconds>`
+  - `--session-id <id>`
+  - `--signaling-server <url>`
+  - `--stun-urls <csv>`
+  - `--turn-urls <csv>`
+  - `--turn-username <value>`
+  - `--turn-credential <value>`
+  - `--chrome <path>`
+  - `--chrome-params <json-array>`
+  - `--remote-debugging-port <port>`
+  - `--json-compact`
+
+### Tool-mode result schema (for LLM)
+
+Tool mode prints one final JSON object to stdout.
+
+Top-level fields:
+
+- `ok` (`boolean`):
+  - `true`: session completed with success (`finish` accepted).
+  - `false`: session ended with timeout or error.
+- `mode` (`string`): selected runtime mode for this tool invocation.
+  - `remote-devtools`: `--remote-debugging-port` was provided and attach succeeded.
+  - `putter`: no `--remote-debugging-port` provided, or attach failed and daemon fell back.
+- `stage` (`string`): current/final stage value.
+- `status` (`string`): current/final status value.
+- `message` (`string`): human-readable summary for this result.
+- `snapshots` (`array`): captured snapshots, usually timeout/finish evidence.
+- `start` (`object`): structured data from session startup workflow.
+- `completion` (`object`): final completion metadata (`outcome`, `status`, `stage`, `statusMessage`, `completedAt`).
+
+Interpretation guidance:
+
+- Success condition: `ok=true` and `status=success`.
+- Timeout condition: `ok=false` and `status=timeout`.
+- Error condition: `ok=false` and `status=error`.
+- Mode-specific shutdown expectation:
+  - `mode=remote-devtools`: daemon exits and preserves Chrome/target page.
+  - `mode=putter`: daemon exits and closes target page + Chrome.
+
 Stages:
 
-- `start`
-- `lauch_chrome`
-- `open_daemon_agent_page`
-- `open_target_page`
-- `connect_to_signalServer`
-- `wait_client_resolve`
-- `user_interaction`
-- `finish`
+- `start`: session object initialized.
+- `lauch_chrome`: launch/attach phase for browser control (spelling kept for compatibility).
+- `open_daemon_agent_page`: daemon-agent page open/re-open phase.
+- `open_target_page`: target page open/navigation phase.
+- `connect_to_signalServer`: daemon-agent signaling connection phase.
+- `wait_client_resolve`: waiting for client resolve command.
+- `user_interaction`: client command replay/share in progress.
+- `finish`: terminal stage (success/timeout/error).
+
+Status values:
+
+- `idle`: initial state before session starts.
+- `running`: in-progress state for active stages.
+- `success`: finish accepted and session completed successfully.
+- `timeout`: no required message in configured timeout window.
+- `error`: unrecoverable workflow/runtime error.
 
 Tool-mode optional params:
 
@@ -251,6 +349,7 @@ Exit behavior in tool mode:
 - On `finish` message from client: capture snapshot and return success status.
 - A client `finish` can complete the session even if `resolve` was not received yet.
 - In both cases, tool-mode exits after emitting the final JSON result.
+- On tool-mode terminal exit, daemon process shuts down but does not explicitly close Chrome or target page.
 
 Tool-mode result payload includes:
 

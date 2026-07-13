@@ -5,3 +5,4 @@ pnpm-lock.yaml
 packages/*/node_modules/
 packages/*/dist/
 packages/*/.vite/
+log/*

@@ -179,6 +179,7 @@ export function startStaticServer({
   getDaemonAgentConfig,
   submitCommand,
   getDaemonState,
+  getSharePreflight,
   enqueueAgentCommand,
   getAgentCommandsAfter,
   onAgentEvent,
@@ -267,6 +268,22 @@ export function startStaticServer({
       writeJson(res, 200, {
         ok: true,
         daemon: getDaemonState(),
+      });
+      return;
+    }
+
+    if (req.url === '/api/v1/share/preflight' && req.method === 'GET') {
+      withCorsHeaders(res);
+      const preflight = typeof getSharePreflight === 'function'
+        ? getSharePreflight()
+        : {
+            browserConnected: false,
+            browserConnectionMode: 'none',
+            warnings: ['Share preflight callback is not configured.'],
+          };
+      writeJson(res, 200, {
+        ok: true,
+        preflight,
       });
       return;
     }

@@ -9,6 +9,41 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const AUTO_SHARE_SOURCE_TITLE = String(process.env.DAEMON_AUTO_SHARE_SOURCE_TITLE || 'Agentic Browser Target').trim();
 
+function normalizeRemoteDebuggingPort(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  const parsed = Number(String(value).trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return Math.floor(parsed);
+}
+
+function getArgValue(arg = '') {
+  const value = String(arg || '').trim();
+  if (!value.startsWith('--')) {
+    return '';
+  }
+  const eqIndex = value.indexOf('=');
+  return eqIndex === -1 ? '' : value.slice(eqIndex + 1);
+}
+
+function resolveRemoteDebuggingPortFromArgs(args = []) {
+  if (!Array.isArray(args)) {
+    return null;
+  }
+
+  const entry = args.find((arg) => BrowserController.getArgName(arg) === '--remote-debugging-port');
+  if (!entry) {
+    return null;
+  }
+
+  return normalizeRemoteDebuggingPort(getArgValue(entry));
+}
+
 function resolveDefaultTimeoutSnapshotDir() {
   const configured = String(process.env.DAEMON_TIMEOUT_SNAPSHOT_DIR || '').trim();
   if (configured) {
@@ -72,21 +107,35 @@ export class BrowserController {
     this.targetPage = null;
     this.userDataDir = resolveDefaultUserDataDir();
     this.cacheDir = resolveDefaultCacheDir();
-    this.defaultLaunchArgs = [
+    this.remoteDebuggingPort = normalizeRemoteDebuggingPort(process.env.DAEMON_CHROME_REMOTE_DEBUGGING_PORT);
+    this.baseLaunchArgs = [
       '--disable-web-security',
       '--disable-blink-features=AutomationControlled',
       '--disable-features=DisableLoadExtensionCommandLineSwitch',
       '--allow-http-screen-capture',
+      `--auto-select-tab-capture-source-by-title=${AUTO_SHARE_SOURCE_TITLE}`,
       `--auto-select-desktop-capture-source=${AUTO_SHARE_SOURCE_TITLE}`,
       '--no-first-run',
       '--no-default-browser-check',
       '--start-maximized',
     ];
+    this.defaultLaunchArgs = this.buildDefaultLaunchArgs(this.remoteDebuggingPort);
     this.launchConfig = {
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
       channel: process.env.PUPPETEER_BROWSER_CHANNEL || 'chrome',
       args: [...this.defaultLaunchArgs],
     };
+    this.browserConnectionMode = 'none';
+    this.remoteAttachAttempted = false;
+    this.remoteAttachConnected = false;
+  }
+
+  buildDefaultLaunchArgs(remoteDebuggingPort = null) {
+    const args = [...this.baseLaunchArgs];
+    if (remoteDebuggingPort) {
+      args.push(`--remote-debugging-port=${remoteDebuggingPort}`);
+    }
+    return args;
   }
 
   static getArgName(arg = '') {
@@ -148,8 +197,17 @@ export class BrowserController {
     const executablePath = typeof config.chrome === 'string' && config.chrome.trim()
       ? config.chrome.trim()
       : this.launchConfig.executablePath;
+    const hasRemotePortOverride = Object.prototype.hasOwnProperty.call(config, 'remoteDebuggingPort');
+    const remotePort = hasRemotePortOverride
+      ? normalizeRemoteDebuggingPort(config.remoteDebuggingPort)
+      : this.remoteDebuggingPort;
+    this.remoteDebuggingPort = remotePort;
+
+    const defaultArgs = this.buildDefaultLaunchArgs(this.remoteDebuggingPort);
     const customArgs = BrowserController.formatChromeArgs(config.params);
-    const args = BrowserController.mergeChromeArgs(this.defaultLaunchArgs, customArgs);
+    const args = BrowserController.mergeChromeArgs(defaultArgs, customArgs);
+    this.defaultLaunchArgs = defaultArgs;
+    this.remoteDebuggingPort = resolveRemoteDebuggingPortFromArgs(args);
 
     this.launchConfig = {
       executablePath,
@@ -158,10 +216,25 @@ export class BrowserController {
     };
   }
 
+  getRuntimeMode() {
+    return this.browserConnectionMode === 'attached' ? 'remote-devtools' : 'putter';
+  }
+
+  shouldPreserveBrowserOnExit() {
+    return this.getRuntimeMode() === 'remote-devtools';
+  }
+
   async launchIfNeeded() {
     if (this.browser) {
       return;
     }
+
+    const attached = this.remoteDebuggingPort ? await this.tryAttachToExistingBrowser() : false;
+    if (attached) {
+      this.browserConnectionMode = 'attached';
+      return;
+    }
+
     const executablePath = this.launchConfig.executablePath;
     const launchArgs = [...this.launchConfig.args];
 
@@ -173,15 +246,197 @@ export class BrowserController {
     logger.info(`Using Chrome user data dir: ${this.userDataDir}`);
     logger.info(`Using Chrome cache dir: ${this.cacheDir}`);
     logger.debug('Effective Chrome launch args', launchArgs);
-    this.browser = await puppeteer.launch({
-      headless: this.headless,
-      channel: this.launchConfig.channel,
-      executablePath,
-      defaultViewport: null,
+    try {
+      this.browser = await puppeteer.launch({
+        headless: this.headless,
+        channel: this.launchConfig.channel,
+        executablePath,
+        defaultViewport: null,
+        userDataDir: this.userDataDir,
+        ignoreDefaultArgs: ['--disable-extensions', '--enable-automation'],
+        args: launchArgs,
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        handleSIGHUP: false,
+      });
+    } catch (error) {
+      const message = String(error?.message || '');
+      const profileInUse = /already running for|userDataDir/i.test(message);
+      if (!profileInUse) {
+        throw error;
+      }
+
+      logger.warn('Chrome profile appears in use; trying attach fallback instead of relaunch.', {
+        userDataDir: this.userDataDir,
+        error: message,
+      });
+
+      const attachedAfterLaunchFail = this.remoteDebuggingPort ? await this.tryAttachToExistingBrowser() : false;
+      if (attachedAfterLaunchFail) {
+        this.browserConnectionMode = 'attached';
+        return;
+      }
+      throw error;
+    }
+
+    this.browserConnectionMode = 'launched';
+    this.markBrowserProcessDetached();
+    await this.hydrateKnownPages();
+  }
+
+  getSharePreflightSnapshot() {
+    const requiredFlags = [
+      '--allow-http-screen-capture',
+      '--auto-select-tab-capture-source-by-title',
+      '--auto-select-desktop-capture-source',
+    ];
+    if (this.remoteDebuggingPort) {
+      requiredFlags.push('--remote-debugging-port');
+    }
+
+    const effectiveArgs = Array.isArray(this.launchConfig?.args) ? this.launchConfig.args : [];
+    const normalizedArgs = effectiveArgs.map((arg) => String(arg || '').trim());
+    const flagChecks = requiredFlags.map((flag) => ({
+      flag,
+      present: normalizedArgs.some((entry) => entry === flag || entry.startsWith(`${flag}=`)),
+    }));
+
+    const warnings = [];
+    if (this.browserConnectionMode === 'attached') {
+      warnings.push('Attached to existing Chrome; capture flags cannot be fully verified from daemon process. Auto-share may still require manual picker confirmation.');
+    }
+    if (!this.browser) {
+      warnings.push('No active browser connection. Launch/attach must succeed before sharing.');
+    }
+
+    return {
+      browserConnected: Boolean(this.browser),
+      browserConnectionMode: this.browserConnectionMode,
+      runtimeMode: this.getRuntimeMode(),
+      remoteDebuggingPort: this.remoteDebuggingPort,
+      remoteAttachAttempted: this.remoteAttachAttempted,
+      remoteAttachConnected: this.remoteAttachConnected,
       userDataDir: this.userDataDir,
-      ignoreDefaultArgs: ['--disable-extensions', '--enable-automation'],
-      args: launchArgs,
+      requiredFlags: flagChecks,
+      allRequiredFlagsConfigured: flagChecks.every((entry) => entry.present),
+      warnings,
+    };
+  }
+
+  markBrowserProcessDetached() {
+    try {
+      const proc = typeof this.browser?.process === 'function' ? this.browser.process() : null;
+      if (proc && typeof proc.unref === 'function') {
+        proc.unref();
+      }
+    } catch {
+      // Best effort only.
+    }
+  }
+
+  async tryAttachToExistingBrowser() {
+    if (!this.remoteDebuggingPort) {
+      return false;
+    }
+
+    this.remoteAttachAttempted = true;
+    const endpoint = await this.resolveBrowserWsEndpoint();
+    if (!endpoint) {
+      this.remoteAttachConnected = false;
+      return false;
+    }
+
+    try {
+      this.browser = await puppeteer.connect({ browserWSEndpoint: endpoint, defaultViewport: null });
+      await this.hydrateKnownPages();
+      this.remoteAttachConnected = true;
+      logger.info(`Attached to existing Chrome via remote debugging port ${this.remoteDebuggingPort}.`);
+      return true;
+    } catch (error) {
+      logger.warn(`Attach to existing Chrome failed: ${error.message}`);
+      this.browser = null;
+      this.remoteAttachConnected = false;
+      return false;
+    }
+  }
+
+  async resolveBrowserWsEndpoint() {
+    const fromRemotePort = await this.readWsEndpointFromChrome();
+    if (fromRemotePort) {
+      return fromRemotePort;
+    }
+
+    const fromDevToolsFile = this.readWsEndpointFromDevToolsActivePort();
+    if (fromDevToolsFile) {
+      return fromDevToolsFile;
+    }
+
+    return '';
+  }
+
+  async readWsEndpointFromChrome() {
+    if (!this.remoteDebuggingPort) {
+      return '';
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1200);
+    try {
+      const response = await fetch(`http://127.0.0.1:${this.remoteDebuggingPort}/json/version`, {
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        return '';
+      }
+      const data = await response.json();
+      return String(data?.webSocketDebuggerUrl || '').trim();
+    } catch {
+      return '';
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  readWsEndpointFromDevToolsActivePort() {
+    const devToolsFile = path.join(this.userDataDir, 'DevToolsActivePort');
+    if (!fs.existsSync(devToolsFile)) {
+      return '';
+    }
+
+    try {
+      const text = fs.readFileSync(devToolsFile, 'utf8');
+      const [portLine] = String(text || '').split(/\r?\n/);
+      const port = Number(String(portLine || '').trim());
+      if (!Number.isFinite(port) || port <= 0) {
+        return '';
+      }
+      return `ws://127.0.0.1:${port}/devtools/browser`;
+    } catch {
+      return '';
+    }
+  }
+
+  async hydrateKnownPages() {
+    if (!this.browser) {
+      return;
+    }
+
+    const pages = await this.browser.pages();
+    const daemonPage = pages.find((entry) => isDaemonAgentUrl(entry.url()));
+    const targetCandidate = pages.find((entry) => {
+      const url = String(entry.url() || '').trim();
+      if (!url || url === 'about:blank') {
+        return false;
+      }
+      return !isDaemonAgentUrl(url);
     });
+
+    if (daemonPage) {
+      this.page = daemonPage;
+    }
+    if (targetCandidate) {
+      this.targetPage = targetCandidate;
+    }
   }
 
   hasTargetPage() {
@@ -502,6 +757,24 @@ export class BrowserController {
     this.browser = null;
     this.page = null;
     this.targetPage = null;
+    this.browserConnectionMode = 'none';
+  }
+
+  async disconnectBrowser() {
+    if (!this.browser) {
+      return;
+    }
+
+    try {
+      this.browser.disconnect();
+    } catch {
+      // Best effort only.
+    }
+
+    this.browser = null;
+    this.page = null;
+    this.targetPage = null;
+    this.browserConnectionMode = 'none';
   }
 
   async captureTargetSnapshot(options = {}) {

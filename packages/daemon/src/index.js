@@ -7,6 +7,7 @@ import { buildCli } from './cli.js';
 import { BrowserController } from './daemon/browserController.js';
 import { AgentControlBridge } from './daemon/agentControlBridge.js';
 import { CommandProcessor } from './daemon/commandProcessor.js';
+import { createToolModeRuntime, PutterMode, RemoteDevtoolsMode } from './daemon/toolMode.js';
 import { createLogger } from './logger.js';
 import { startStaticServer } from './server.js';
 
@@ -124,8 +125,16 @@ function parseAweDaemonToolOptions(argv = []) {
       continue;
     }
 
-    const key = normalizeToolFlagName(token);
+    const eqIndex = token.indexOf('=');
+    const rawName = eqIndex === -1 ? token : token.slice(0, eqIndex);
+    const inlineValue = eqIndex === -1 ? '' : token.slice(eqIndex + 1);
+    const key = normalizeToolFlagName(rawName);
     if (!key) {
+      continue;
+    }
+
+    if (eqIndex !== -1) {
+      options[key] = inlineValue;
       continue;
     }
 
@@ -172,6 +181,9 @@ function parseAweDaemonToolOptions(argv = []) {
   }
   if (options.chrome !== undefined) {
     payload.chrome = options.chrome;
+  }
+  if (options.remoteDebuggingPort !== undefined) {
+    payload.remoteDebuggingPort = options.remoteDebuggingPort;
   }
   if (options.chromeParams !== undefined) {
     payload.chromeParams = options.chromeParams;
@@ -570,9 +582,18 @@ async function startSessionWorkflow(payload = {}) {
     : normalizeIceUrlList(session.turnUrls || config.turnUrls);
   const turnUsername = String(payload.turnUsername ?? session.turnUsername ?? config.turnUsername ?? '').trim();
   const turnCredential = String(payload.turnCredential ?? session.turnCredential ?? config.turnCredential ?? '').trim();
+  const hasRemoteDebuggingPort = Object.prototype.hasOwnProperty.call(payload, 'remoteDebuggingPort');
   const chromeExecutablePath = String(
     payload.chrome ?? process.env.DAEMON_SESSION_START_CHROME ?? process.env.PUPPETEER_EXECUTABLE_PATH ?? ''
   ).trim();
+  let remoteDebuggingPort = null;
+  if (hasRemoteDebuggingPort) {
+    const parsedRemotePort = Number(payload.remoteDebuggingPort);
+    if (!Number.isFinite(parsedRemotePort) || parsedRemotePort <= 0) {
+      throw new Error('remote-debugging-port must be a positive number.');
+    }
+    remoteDebuggingPort = Math.floor(parsedRemotePort);
+  }
   const chromeParamsRaw = payload.chromeParams ?? process.env.DAEMON_SESSION_START_CHROME_PARAMS_JSON ?? '[]';
   const chromeParams = parseChromeParamsValue(chromeParamsRaw);
 
@@ -603,6 +624,7 @@ async function startSessionWorkflow(payload = {}) {
     type: 'launch_chrome',
     payload: {
       chrome: chromeExecutablePath,
+      remoteDebuggingPort: hasRemoteDebuggingPort ? remoteDebuggingPort : null,
       params: chromeParams,
     },
   });
@@ -772,7 +794,11 @@ if (process.argv.length > 2 && !toolModePayload) {
     browserModuleDir,
     host: config.staticServerHost,
     port: config.staticServerPort,
-    getDaemonAgentConfig: () => session,
+    getDaemonAgentConfig: () => ({
+      ...session,
+      runtimeMode: browser.getRuntimeMode(),
+      browserConnectionMode: browser.browserConnectionMode,
+    }),
     submitCommand: (command) => commands.handle(command),
     getDaemonState: () => ({
       daemonId: session.daemonId,
@@ -786,6 +812,7 @@ if (process.argv.length > 2 && !toolModePayload) {
       activeSession,
       agentBridge: agentBridge.snapshot(),
     }),
+    getSharePreflight: () => browser.getSharePreflightSnapshot(),
     startSession: (payload) => startSessionWorkflow(payload),
     getLatestSavedSnapshot: () => getLatestTimeoutSnapshot(),
     enqueueAgentCommand: (type, payload) => {
@@ -1015,22 +1042,56 @@ if (process.argv.length > 2 && !toolModePayload) {
     armClientMessageTimeout('runtime_start');
   }
 
-  const shutdown = async (exitCode = null) => {
+  const shutdown = async (exitCode = null, options = {}) => {
     if (shuttingDown) {
       return;
     }
+    const toolModeRuntime = options.toolModeRuntime || null;
+    const preserveBrowser = Object.prototype.hasOwnProperty.call(options, 'preserveBrowser')
+      ? Boolean(options.preserveBrowser)
+      : browser.shouldPreserveBrowserOnExit();
     const code = Number.isInteger(exitCode) ? exitCode : (Number.isInteger(process.exitCode) ? process.exitCode : 0);
     shuttingDown = true;
     clearClientMessageTimeout();
-    await browser.closeTargetPage();
-    await browser.closeBrowser();
-    await new Promise((resolve, reject) => {
-      server.close((error) => {
-        if (error) {
-          reject(error);
-        } else {
+
+    if (toolModeRuntime) {
+      await toolModeRuntime.shutdownBrowser();
+    } else if (preserveBrowser) {
+      await new RemoteDevtoolsMode({
+        browser,
+        logger,
+        requestedRemoteDebuggingPort: browser.remoteDebuggingPort,
+      }).shutdownBrowser();
+    } else {
+      await new PutterMode({ browser, logger, reason: 'default runtime shutdown' }).shutdownBrowser();
+    }
+    const serverCloseGraceMs = 1500;
+    await Promise.race([
+      new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
           resolve();
+        });
+
+        if (typeof server.closeIdleConnections === 'function') {
+          server.closeIdleConnections();
         }
+      }),
+      new Promise((resolve) => {
+        setTimeout(() => {
+          if (typeof server.closeAllConnections === 'function') {
+            server.closeAllConnections();
+          }
+          logger.warn(`Server close grace period elapsed (${serverCloseGraceMs}ms). Forcing daemon exit.`);
+          resolve();
+        }, serverCloseGraceMs);
+      }),
+    ]).catch((error) => {
+      logger.warn('Server close reported an error during shutdown; continuing to exit.', {
+        error: error.message,
       });
     });
     process.exit(code);
@@ -1054,10 +1115,22 @@ if (process.argv.length > 2 && !toolModePayload) {
 
     try {
       const startResult = await startSessionWorkflow(toolModePayload);
+      const toolModeRuntime = createToolModeRuntime({
+        browser,
+        logger,
+        requestedRemoteDebuggingPort: toolModePayload.remoteDebuggingPort,
+      });
+      logger.info('Tool-mode runtime selected', {
+        mode: toolModeRuntime.name,
+        requestedRemoteDebuggingPort: toolModePayload.remoteDebuggingPort,
+        browserConnectionMode: browser.browserConnectionMode,
+      });
+
       const completion = await waitForSessionCompletion(Math.max(activeSession.timeoutMs + 60000, activeSession.timeoutMs));
       const ok = completion.outcome === 'success';
       const result = {
         ok,
+        mode: toolModeRuntime.name,
         stage: activeSession.stage,
         status: activeSession.status,
         message: completion.statusMessage || (ok ? 'Session completed successfully.' : 'Session completed with timeout.'),
@@ -1067,7 +1140,7 @@ if (process.argv.length > 2 && !toolModePayload) {
       };
 
       emitToolResult(result, { compact: Boolean(toolModePayload.jsonCompact) });
-      await shutdown(ok ? 0 : 124);
+      await shutdown(ok ? 0 : 124, { toolModeRuntime });
     } catch (error) {
       updateSessionProgress(activeSession.stage || SESSION_STAGES.START, 'error', error.message);
       emitToolResult({
@@ -1076,7 +1149,12 @@ if (process.argv.length > 2 && !toolModePayload) {
         status: activeSession.status,
         message: error.message,
       }, { compact: Boolean(toolModePayload.jsonCompact), isError: true });
-      await shutdown(1);
+      const toolModeRuntime = createToolModeRuntime({
+        browser,
+        logger,
+        requestedRemoteDebuggingPort: toolModePayload.remoteDebuggingPort,
+      });
+      await shutdown(1, { toolModeRuntime });
     }
   }
 }
