@@ -1,3 +1,39 @@
+// Import shared binary encoding/decoding from local module
+import {
+  encodeMouseCommandBinary,
+  decodeMouseCommandBinary,
+} from './mouseCommandBinary.js';
+
+// Re-export for backward compatibility
+export { encodeMouseCommandBinary, decodeMouseCommandBinary };
+
+// Button type constants for compact transmission
+export const BUTTON_LEFT = 0;
+export const BUTTON_MIDDLE = 1;
+export const BUTTON_RIGHT = 2;
+
+export function buttonNameToCode(buttonName) {
+  switch (String(buttonName || '').toLowerCase()) {
+    case 'middle':
+      return BUTTON_MIDDLE;
+    case 'right':
+      return BUTTON_RIGHT;
+    default:
+      return BUTTON_LEFT;
+  }
+}
+
+export function buttonCodeToName(buttonCode) {
+  switch (Number(buttonCode || 0)) {
+    case BUTTON_MIDDLE:
+      return 'middle';
+    case BUTTON_RIGHT:
+      return 'right';
+    default:
+      return 'left';
+  }
+}
+
 export function getRenderedVideoContentRect(videoElement) {
   if (!videoElement) {
     throw new Error('A video element is required.');
@@ -75,31 +111,66 @@ export function mapPointerToVideoSpace(videoElement, pointerEvent) {
   };
 }
 
-export function getPointerButtonName(pointerEvent, fallback = 'left') {
+export function getPointerButtonName(pointerEvent, fallback = BUTTON_LEFT) {
   if (!pointerEvent) {
     return fallback;
   }
 
   if (pointerEvent.button === 2) {
-    return 'right';
+    return BUTTON_RIGHT;
   }
   if (pointerEvent.button === 1) {
-    return 'middle';
+    return BUTTON_MIDDLE;
   }
-  return fallback;
+  return BUTTON_LEFT;
 }
 
-export function buildViewerMousePayload(videoElement, pointerEvent, options = {}) {
+export function buildViewerMousePayload(videoElement, pointerEvent, options = {}, commandType = 'mouse_move') {
   const mapped = mapPointerToVideoSpace(videoElement, pointerEvent);
+  const buttonCode = options.button !== undefined ? options.button : getPointerButtonName(pointerEvent);
+  
+  // Command-specific optimization: omit unnecessary fields per command type
   const payload = {
     x: mapped.x,
     y: mapped.y,
-    button: options.button || getPointerButtonName(pointerEvent),
-    sourceWidth: mapped.sourceWidth,
-    sourceHeight: mapped.sourceHeight,
-    isDragging: Boolean(options.isDragging),
-    ...options.extraPayload,
   };
+
+  // Add button code for commands that need it
+  if (commandType !== 'mouse_move') {
+    payload.b = buttonCode;
+  }
+
+  // Add source dimensions:
+  // - Always for non-move commands (click/down/up)
+  // - For mouse_move: ONLY if isDragging is true (to initialize/refresh cache)
+  // - For mouse_move: omit if NOT dragging (pure movement, rely on cached dims)
+  const isDragging = options.extraPayload?.isDragging ?? false;
+  
+  if (commandType !== 'mouse_move' || isDragging) {
+    payload.sx = mapped.sourceWidth;
+    payload.sy = mapped.sourceHeight;
+  }
+
+  // Merge ONLY transmittable viewport/coordinate data into payload
+  // Exclude client-side control flags (isDragging, etc.) which shouldn't be transmitted
+  if (options.extraPayload) {
+    // Copy only viewport/context fields, skip control flags
+    const transmittableFields = {
+      viewScrollLeft: options.extraPayload.viewScrollLeft,
+      viewScrollTop: options.extraPayload.viewScrollTop,
+      viewWidth: options.extraPayload.viewWidth,
+      viewHeight: options.extraPayload.viewHeight,
+      viewSourceWidth: options.extraPayload.viewSourceWidth,
+      viewSourceHeight: options.extraPayload.viewSourceHeight,
+    };
+    
+    // Only add fields that have values (avoid null/undefined)
+    Object.entries(transmittableFields).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        payload[key] = value;
+      }
+    });
+  }
 
   return {
     mapped,
@@ -122,9 +193,8 @@ export function createViewerMouseCommandSender({
   return async function sendViewerMouseCommand(type, pointerEvent, extraPayload = {}) {
     const { mapped, payload } = buildViewerMousePayload(videoElement, pointerEvent, {
       button: extraPayload.button,
-      isDragging: getIsDragging(),
       extraPayload,
-    });
+    }, type);  // Pass command type for optimized payload
 
     if (onPointerMapped) {
       onPointerMapped(mapped, { type, pointerEvent, extraPayload, payload });
@@ -134,10 +204,35 @@ export function createViewerMouseCommandSender({
       onBeforeSend({ type, payload, mapped, pointerEvent, extraPayload });
     }
 
-    const requestId = await sendCommand(type, payload);
+    // Always encode mouse_move events to binary format for ultra-compact transmission
+    // Works for all clients (desktop and phone) to maximize bandwidth reduction
+    let transmitPayload = payload;
+    let usedBinaryEncoding = false;
+    
+    if (type === 'mouse_move') {
+      transmitPayload = encodeMouseCommandBinary(
+        type,
+        payload.x,
+        payload.y,
+        payload.b ?? BUTTON_LEFT,
+        payload.sx ?? 0,
+        payload.sy ?? 0
+      );
+      usedBinaryEncoding = true;
+    }
+
+    const requestId = await sendCommand(type, transmitPayload);
 
     if (onAfterSend) {
-      onAfterSend({ type, payload, mapped, requestId, pointerEvent, extraPayload });
+      onAfterSend({ 
+        type, 
+        payload, 
+        mapped, 
+        requestId, 
+        pointerEvent, 
+        extraPayload,
+        format: usedBinaryEncoding ? 'binary' : 'json',
+      });
     }
 
     return { requestId, payload, mapped };

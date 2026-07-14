@@ -5,6 +5,13 @@ export {
 	getPointerButtonName,
 	getRenderedVideoContentRect,
 	mapPointerToVideoSpace,
+	BUTTON_LEFT,
+	BUTTON_MIDDLE,
+	BUTTON_RIGHT,
+	buttonNameToCode,
+	buttonCodeToName,
+	encodeMouseCommandBinary,
+	decodeMouseCommandBinary,
 } from './viewerUtils.js';
 export {
 	hasAnySearchParam,
@@ -14,3 +21,4 @@ export {
 	readSearchPercentParam,
 	summarizeIceConfigForLog,
 } from './utils.js';
+export { createPeerIds } from './peerIds.js';

@@ -1,5 +1,6 @@
 import {
   AgenticBrowserClient,
+  createPeerIds,
   createViewerMouseCommandSender,
   hasAnySearchParam,
   loadClientRuntimeConfig,
@@ -24,9 +25,12 @@ async function init() {
   let keyboardFabDrag = null;
   let keyboardFabSuppressClick = false;
   let resolveSent = false;
-  let resolvePromise = null;
+  let resolveAcked = false;
   let resolveAttempts = 0;
+  let resolveInFlight = false;
   let resolveRetryTimer = null;
+  let messageChannelReady = false;
+  let daemonReadyHint = false;
   let hScrollHideTimer = null;
   let hScrollDrag = null;
   let hScrollHovering = false;
@@ -40,11 +44,26 @@ async function init() {
   let swipeTarget = null; // 'video' or 'scrollbar'
   let touchCount = 0;
   let leaveSent = false;
-  const maxResolveAttempts = 5;
+  const resolveWarnThreshold = 5;
+  const resolveRetryDelayMs = 2000;
+  const dragMoveThrottleMs = 34;
+  let pendingMoveEvent = null;
+  let pendingMoveExtra = null;
+  let moveFlushTimer = null;
+  let moveSendInFlight = false;
+  const clientState = {
+    owtConnecting: 'Connecting to OWT',
+    owtConnected: 'Connected to OWT',
+    owtDisconnected: 'Disconnected from OWT',
+    daemonConnecting: 'Connecting to daemon',
+    daemonConnected: 'Connected to daemon',
+    daemonDisconnected: 'Disconnected from daemon',
+    daemonInteraction: 'Daemon interaction',
+  };
 
   const el = {
-    status: document.getElementById('status'),
     finishBtn: document.getElementById('finishBtn'),
+    terminalNotice: document.getElementById('terminalNotice'),
     remotePanel: document.querySelector('.mobile-remote-panel'),
     remoteVideo: document.getElementById('remoteVideo'),
     hScrollOverlay: document.getElementById('hScrollOverlay'),
@@ -53,7 +72,6 @@ async function init() {
     vScrollThumb: document.getElementById('vScrollThumb'),
     keyboardFab: document.getElementById('keyboardFab'),
     keyboardCapture: document.getElementById('keyboardCapture'),
-    logs: document.getElementById('logs'),
   };
 
   const viewState = {
@@ -62,9 +80,27 @@ async function init() {
     sourceHeight: 720,
   };
 
-  const envSignalingServer = readSearchParam(searchParams, 'signalingUrl', runtimeConfig.signalingServer || import.meta.env?.SIGNALING_SERVER || window.location.origin);
-  const envClientId = readSearchParam(searchParams, 'clientId', runtimeConfig.clientId || import.meta.env?.CLIENT_ID || 'client-1');
-  const envDaemonId = readSearchParam(searchParams, 'remoteId', runtimeConfig.daemonId || import.meta.env?.DAEMON_ID || 'daemon-1');
+  const defaultSignalingServer = 'http://localhost:8095';
+  const envSignalingServer = readSearchParam(searchParams, 'signalingUrl', 
+                          runtimeConfig.signalingServer || 
+                          import.meta.env?.SIGNALING_SERVER || 
+                          defaultSignalingServer);
+  console.log('[mobile_client] Resolved signaling server to:', envSignalingServer, '(from config:', runtimeConfig.signalingServer, ')');
+  if (!runtimeConfig.signalingServer && !import.meta.env?.SIGNALING_SERVER) {
+    console.warn('[mobile_client] Using default signaling server. Consider setting SIGNALING_SERVER env var or /client-demo.runtime.json');
+  }
+  const sessionId = readSearchParam(searchParams, 'sessionId', runtimeConfig.sessionId || import.meta.env?.SESSION_ID || '');
+  const derivedPeerIds = sessionId ? createPeerIds(sessionId) : null;
+  const envClientId = readSearchParam(
+    searchParams,
+    'clientId',
+    derivedPeerIds?.clientId || runtimeConfig.clientId || import.meta.env?.CLIENT_ID || 'client-1'
+  );
+  const envDaemonId = readSearchParam(
+    searchParams,
+    'remoteId',
+    derivedPeerIds?.daemonId || runtimeConfig.daemonId || import.meta.env?.DAEMON_ID || 'daemon-1'
+  );
   const paramStunUrls = readSearchParamAny(searchParams, ['stunUrls', 'STUN_SERVER_URLS'], '');
   const paramTurnUrls = readSearchParamAny(searchParams, ['turnUrls', 'TURN_SERVER_URLS'], '');
   const paramTurnUsername = readSearchParamAny(searchParams, ['turnUsername', 'turnUserName', 'turnUser', 'TURN_USERNAME'], '');
@@ -109,7 +145,7 @@ async function init() {
     return String(envDaemonId || '').trim();
   }
 
-  function sendLeaveMessage(reason) {
+  async function sendLeaveMessage(reason) {
     if (leaveSent || !connected) {
       return;
     }
@@ -131,9 +167,14 @@ async function init() {
     };
 
     try {
-      void client.sendMessage(leaveMessage, daemonId).catch(() => {});
-    } catch {
-      // Keep close flow best-effort only.
+      console.log('[mobile] sending leave message', { reason, daemonId });
+      await Promise.race([
+        client.sendMessage(leaveMessage, daemonId),
+        new Promise(resolve => setTimeout(resolve, 500)), // Max wait 500ms
+      ]);
+      console.log('[mobile] leave message sent', { reason });
+    } catch (error) {
+      console.log('[mobile] leave message failed', { reason, error: error?.message });
     }
   }
 
@@ -169,8 +210,30 @@ async function init() {
   }
 
   function setStatus(state, message) {
-    el.status.dataset.state = state;
-    el.status.textContent = message;
+    console.log(`[mobile_client] status update: state=${state} message=${message}`);
+  }
+
+  function setClientState(stateKey, message) {
+    const nextState = clientState[stateKey] || stateKey;
+    setStatus(nextState, message);
+  }
+
+  function showTerminalNotice(state, message) {
+    if (!el.terminalNotice) {
+      return;
+    }
+
+    const text = String(message || '').trim();
+    if (!text) {
+      el.terminalNotice.classList.remove('is-visible');
+      el.terminalNotice.dataset.state = 'idle';
+      el.terminalNotice.textContent = '';
+      return;
+    }
+
+    el.terminalNotice.dataset.state = state;
+    el.terminalNotice.textContent = text;
+    el.terminalNotice.classList.add('is-visible');
   }
 
   function clearResolveRetryTimer() {
@@ -181,16 +244,11 @@ async function init() {
   }
 
   async function sendResolve(reason = 'unspecified') {
-    if (!connected || resolveSent || resolvePromise) {
+    if (!connected || resolveSent || resolveAcked || resolveInFlight) {
       return;
     }
 
-    if (resolveAttempts >= maxResolveAttempts) {
-      setStatus('error', `Resolve not acknowledged after ${maxResolveAttempts} attempts.`);
-      log(`Resolve stopped after ${maxResolveAttempts} attempts.`);
-      return;
-    }
-
+    resolveInFlight = true;
     resolveAttempts += 1;
     const resolveMessage = {
       type: 'resolve',
@@ -200,32 +258,96 @@ async function init() {
       },
     };
 
-    setStatus('connecting', `Sending Resolve to daemon "${getDaemonId()}" (attempt ${resolveAttempts}/${maxResolveAttempts})...`);
+    setClientState('daemonConnecting', `Sending Resolve to daemon "${getDaemonId()}" (attempt ${resolveAttempts})...`);
     log(`Resolve send requested (${reason}) attempt ${resolveAttempts}: ${JSON.stringify(resolveMessage)}`);
 
-    resolvePromise = client.sendMessage(resolveMessage)
+    void client.sendMessage(resolveMessage)
       .then(() => {
-        setStatus('connecting', `Resolve sent to daemon "${getDaemonId()}". Waiting for response...`);
+        setClientState('daemonConnecting', `Resolve sent to daemon "${getDaemonId()}". Waiting for response...`);
         log(`Resolve sent to daemon "${getDaemonId()}".`);
       })
       .catch((error) => {
         log(`Resolve send failed: ${error.message}`);
-      })
-      .finally(() => {
-        resolvePromise = null;
-
-        if (!resolveSent && resolveAttempts < maxResolveAttempts) {
-          clearResolveRetryTimer();
-          resolveRetryTimer = window.setTimeout(() => {
-            void sendResolve('retry-timer');
-          }, 1800);
-        }
+        console.warn('[mobile_client] Resolve send failed', {
+          reason,
+          attempt: resolveAttempts,
+          error: error?.message,
+        });
       });
+
+    if (!resolveSent && !resolveAcked && connected) {
+      if (resolveAttempts === resolveWarnThreshold) {
+        log(`Resolve not acknowledged after ${resolveWarnThreshold} attempts. Keep retrying until daemon is ready.`);
+      }
+      clearResolveRetryTimer();
+      resolveRetryTimer = window.setTimeout(() => {
+        // Allow the next attempt (either this retry, or a fresh daemon_online broadcast)
+        // to proceed once the previous attempt's ack window has elapsed.
+        resolveInFlight = false;
+        void sendResolve('retry-timer');
+      }, resolveRetryDelayMs);
+    } else {
+      resolveInFlight = false;
+    }
   }
 
   function log(message) {
-    if (el.logs) {
-      el.logs.textContent += `${message}\n`;
+    console.log(message);
+  }
+
+  async function flushPendingDragMove() {
+    if (!pendingMoveEvent || moveSendInFlight) {
+      return;
+    }
+
+    const eventToSend = pendingMoveEvent;
+    const extraToSend = pendingMoveExtra || { isDragging: true };
+    pendingMoveEvent = null;
+    pendingMoveExtra = null;
+    moveSendInFlight = true;
+
+    try {
+      log(`[DRAG] Flushing: (${eventToSend.clientX}, ${eventToSend.clientY}), extra=${JSON.stringify(extraToSend)}`);
+      await sendMappedMouseCommand('mouse_move', eventToSend, extraToSend);
+    } catch (err) {
+      log(`[DRAG] Error flushing: ${err.message}`);
+      // Keep drag move lightweight.
+    } finally {
+      moveSendInFlight = false;
+      if (pendingMoveEvent) {
+        log(`[DRAG] Another event queued, scheduling flush`);
+        scheduleDragMoveFlush();
+      }
+    }
+  }
+
+  function scheduleDragMoveFlush() {
+    if (moveFlushTimer) {
+      return;
+    }
+
+    moveFlushTimer = window.setTimeout(async () => {
+      moveFlushTimer = null;
+      await flushPendingDragMove();
+    }, dragMoveThrottleMs);
+  }
+
+  function queueDragMove(event, extraPayload = { isDragging: true }) {
+    pendingMoveEvent = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      button: event.button,
+    };
+    pendingMoveExtra = extraPayload;
+    scheduleDragMoveFlush();
+  }
+
+  function clearPendingDragMove() {
+    pendingMoveEvent = null;
+    pendingMoveExtra = null;
+    if (moveFlushTimer) {
+      window.clearTimeout(moveFlushTimer);
+      moveFlushTimer = null;
     }
   }
 
@@ -251,12 +373,12 @@ async function init() {
   }
 
   function clampKeyboardFabPosition(left, top) {
-    const panel = el.remoteVideo?.closest('.mobile-remote-panel');
-    if (!panel || !el.keyboardFab) {
+    const boundsHost = el.keyboardFab?.offsetParent || el.remoteVideo?.closest('.mobile-remote-panel');
+    if (!boundsHost || !el.keyboardFab) {
       return { left, top };
     }
 
-    const panelRect = panel.getBoundingClientRect();
+    const panelRect = boundsHost.getBoundingClientRect();
     const fabRect = el.keyboardFab.getBoundingClientRect();
     const minLeft = 8;
     const minTop = 8;
@@ -316,24 +438,78 @@ async function init() {
     const sourceHeight = Math.max(1, Number(el.remoteVideo.videoHeight || viewState.sourceHeight || 1));
     const renderedWidth = Math.max(1, el.remoteVideo.clientWidth || container.clientWidth || sourceWidth);
     const renderedHeight = Math.max(1, el.remoteVideo.clientHeight || container.clientHeight || sourceHeight);
-    const sourcePerCssX = sourceWidth / renderedWidth;
-    const sourcePerCssY = sourceHeight / renderedHeight;
 
-    return {
-      viewScrollLeft: Math.max(0, Math.round(container.scrollLeft * sourcePerCssX)),
-      viewScrollTop: Math.max(0, Math.round(container.scrollTop * sourcePerCssY)),
-      viewWidth: Math.max(1, Math.round(container.clientWidth * sourcePerCssX)),
-      viewHeight: Math.max(1, Math.round(container.clientHeight * sourcePerCssY)),
+    // Calculate centering offset for letterboxing (aspect ratio mismatch)
+    const containerAspect = renderedWidth / renderedHeight;
+    const sourceAspect = sourceWidth / sourceHeight;
+    let contentWidth = renderedWidth;
+    let contentHeight = renderedHeight;
+
+    if (Number.isFinite(containerAspect) && Number.isFinite(sourceAspect) && sourceWidth > 0 && sourceHeight > 0) {
+      if (sourceAspect > containerAspect) {
+        // Source is wider: vertical letterbox (top/bottom black bars)
+        contentHeight = renderedWidth / sourceAspect;
+      } else {
+        // Source is taller: horizontal letterbox (left/right black bars)
+        contentWidth = renderedHeight * sourceAspect;
+      }
+    }
+
+    const sourcePerCssX = sourceWidth / contentWidth;
+    const sourcePerCssY = sourceHeight / contentHeight;
+
+    // Use the actually visible video content area. Container can be taller/wider than
+    // rendered content after layout changes, which would otherwise inflate mapped Y/X.
+    const visibleCssWidth = Math.max(1, Math.min(container.clientWidth, contentWidth));
+    const visibleCssHeight = Math.max(1, Math.min(container.clientHeight, contentHeight));
+
+    const mappedViewWidth = Math.max(1, Math.round(visibleCssWidth * sourcePerCssX));
+    const mappedViewHeight = Math.max(1, Math.round(visibleCssHeight * sourcePerCssY));
+
+    const maxMappedScrollLeft = Math.max(0, sourceWidth - mappedViewWidth);
+    const maxMappedScrollTop = Math.max(0, sourceHeight - mappedViewHeight);
+
+    const mappedScrollLeft = Math.max(0, Math.round(container.scrollLeft * sourcePerCssX));
+    const mappedScrollTop = Math.max(0, Math.round(container.scrollTop * sourcePerCssY));
+
+    const payload = {
+      viewScrollLeft: Math.min(maxMappedScrollLeft, mappedScrollLeft),
+      viewScrollTop: Math.min(maxMappedScrollTop, mappedScrollTop),
+      viewWidth: mappedViewWidth,
+      viewHeight: mappedViewHeight,
       viewSourceWidth: sourceWidth,
       viewSourceHeight: sourceHeight,
     };
+
+    return payload;
   }
 
   async function sendMappedMouseCommand(type, event, extraPayload = {}) {
-    return sendMouseCommand(type, event, {
-      ...getViewportMappingPayload(),
+    const viewportPayload = getViewportMappingPayload();
+    const fullPayload = {
+      ...viewportPayload,
       ...extraPayload,
-    });
+    };
+    
+    if (type === 'mouse_move') {
+      console.debug('[sendMappedMouseCommand] mouse_move', {
+        transmitted: {
+          x: 'set by mapping',
+          y: 'set by mapping',
+          sx: 'set if isDragging=true',
+          sy: 'set if isDragging=true',
+          viewWidth: viewportPayload.viewWidth,
+          viewHeight: viewportPayload.viewHeight,
+          viewScrollLeft: viewportPayload.viewScrollLeft,
+          viewScrollTop: viewportPayload.viewScrollTop,
+        },
+        clientLocal: {
+          isDragging: extraPayload.isDragging,
+        },
+      });
+    }
+    
+    return sendMouseCommand(type, event, fullPayload);
   }
 
   function updateHorizontalScrollbar() {
@@ -648,16 +824,48 @@ async function init() {
     },
     videoElement: el.remoteVideo,
     getIsDragging: () => isMousePressed,
-    onAfterSend: ({ type, requestId }) => {
-      log(`${type} sent (${requestId}).`);
+    onPointerMapped: (mapped, { type, pointerEvent, extraPayload }) => {
+      if (type === 'mouse_click') {
+        const viewportInfo = getViewportMappingPayload();
+        log(
+          `[DEBUG] ${type} - raw: (${Math.round(pointerEvent.clientX)}, ${Math.round(pointerEvent.clientY)}) ` +
+          `mapped: (${mapped.x}, ${mapped.y}) ` +
+          `source: ${mapped.sourceWidth}x${mapped.sourceHeight} ` +
+          `content: ${Math.round(mapped.contentRect.width)}x${Math.round(mapped.contentRect.height)} ` +
+          `offset: (${mapped.contentRect.offsetX}, ${mapped.contentRect.offsetY}) ` +
+          `viewport: scroll(${viewportInfo.viewScrollLeft}, ${viewportInfo.viewScrollTop}) ` +
+          `size(${viewportInfo.viewWidth}, ${viewportInfo.viewHeight})`
+        );
+      }
+    },
+    onAfterSend: ({ type, requestId, payload, mapped }) => {
+      if (type === 'mouse_click') {
+        log(`${type} sent (${requestId}): x=${payload.x} y=${payload.y} source=${payload.sourceWidth}x${payload.sourceHeight}`);
+      } else if (type !== 'mouse_move') {
+        log(`${type} sent (${requestId}).`);
+      }
     },
   });
 
   client.onRemoteStream = (stream) => {
-    if (stream?.mediaStream) {
-      el.remoteVideo.srcObject = stream.mediaStream;
+    const mediaStream =
+      (stream?.mediaStream instanceof MediaStream)
+        ? stream.mediaStream
+        : (stream instanceof MediaStream ? stream : null);
+
+    if (mediaStream) {
+      el.remoteVideo.autoplay = true;
+      el.remoteVideo.playsInline = true;
+      el.remoteVideo.muted = true;
+
+      if (el.remoteVideo.srcObject !== mediaStream) {
+        el.remoteVideo.srcObject = mediaStream;
+      }
+
       el.remoteVideo.play().catch(() => {});
-      setStatus('active', 'Connected and receiving remote stream.');
+      daemonReadyHint = true;
+      setClientState('daemonConnected', `Daemon "${getDaemonId()}" started screen sharing.`);
+      setClientState('daemonInteraction', 'Connected and receiving remote stream.');
       log('Remote stream attached.');
       return;
     }
@@ -665,15 +873,8 @@ async function init() {
     log('Remote stream event received without mediaStream.');
   };
 
-  client.onDataChannelOpen = ({ label }) => {
-    if (label !== 'message') {
-      return;
-    }
-    if (!resolveSent) {
-      setStatus('connecting', `Data channel connected for daemon "${getDaemonId()}".`);
-      log('Data channel connected. Pending Resolve should flush now.');
-      void sendResolve('data-channel-open');
-    }
+  client.onSignalingConnected = ({ uid, host }) => {
+    log(`Signaling authenticated as "${uid}" via "${host}".`);
   };
 
   el.remoteVideo.addEventListener('loadedmetadata', () => {
@@ -780,26 +981,82 @@ async function init() {
 
   client.onDisconnect = () => {
     connected = false;
+    messageChannelReady = false;
+    daemonReadyHint = false;
     leaveSent = false;
     resolveSent = false;
-    resolvePromise = null;
+    resolveAcked = false;
     resolveAttempts = 0;
+    resolveInFlight = false;
     clearResolveRetryTimer();
-    setStatus('idle', 'Disconnected from signaling.');
+    clearPendingDragMove();
+    setClientState('owtDisconnected', 'Disconnected from signaling.');
     log('Disconnected from signaling server.');
   };
 
   client.onMessage = ({ origin, message }) => {
     try {
-      const parsed = JSON.parse(message);
+      const rawMessage =
+        message && typeof message === 'object'
+          ? (Object.prototype.hasOwnProperty.call(message, 'message')
+            ? message.message
+            : (Object.prototype.hasOwnProperty.call(message, 'data') ? message.data : message))
+          : message;
+      const parsed = typeof rawMessage === 'string' ? JSON.parse(rawMessage) : rawMessage;
+      if (parsed.type === 'daemon_online') {
+        const daemonId = String(parsed?.payload?.daemonId || getDaemonId()).trim();
+        if (daemonId) {
+          client.setDaemonId(daemonId);
+        }
+        daemonReadyHint = true;
+        setClientState('daemonConnected', `Daemon "${daemonId || getDaemonId()}" is online.`);
+        if (resolveInFlight) {
+          log(`daemon_online received from "${origin}" while a Resolve attempt is already in flight; skipping.`);
+          return;
+        }
+        setClientState('daemonConnecting', `Sending Resolve to daemon "${daemonId || getDaemonId()}"...`);
+        log(`daemon_online received from "${origin}". Triggering Resolve.`);
+        void sendResolve('daemon-online');
+        return;
+      }
+      if (parsed.type === 'resolve_ack') {
+        resolveAcked = true;
+        resolveInFlight = false;
+        clearResolveRetryTimer();
+        setClientState('daemonConnected', 'Resolve acknowledged by daemon. Waiting for result...');
+        log(`Resolve acknowledged by daemon. Waiting for result...`);
+        console.log('[mobile_client] resolve_ack received', { requestId: parsed.requestId });
+        return;
+      }
       if (parsed.type === 'resolve_result') {
         const ok = parsed.ok !== false;
         if (ok) {
           resolveSent = true;
           clearResolveRetryTimer();
         }
-        setStatus(ok ? 'active' : 'error', ok ? 'Resolve processed. Daemon is starting screen share.' : `Resolve failed: ${parsed.error || 'unknown error'}`);
+        resolveInFlight = false;
+        setClientState(ok ? 'daemonConnected' : 'daemonDisconnected', ok ? 'Resolve processed. Daemon is starting screen share.' : `Resolve failed: ${parsed.error || 'unknown error'}`);
         log(`Resolve result: ${ok ? 'ok' : 'failed'} ${parsed.error ? `(${parsed.error})` : ''}`);
+        return;
+      }
+      if (parsed.type === 'timeout_notice' || parsed.type === 'finish_ack') {
+        const isFinish = parsed.type === 'finish_ack';
+        const noticeMessage = String(parsed.message || parsed.payload?.message || (isFinish
+          ? 'Session finished by daemon.'
+          : 'Session timed out on daemon.')).trim();
+
+        showTerminalNotice(isFinish ? 'active' : 'error', noticeMessage);
+        setClientState('daemonDisconnected', noticeMessage);
+        log(`${parsed.type} received: ${noticeMessage}`);
+
+        void client.disconnect().catch(() => {});
+        connected = false;
+        leaveSent = false;
+        resolveSent = false;
+        resolveAcked = false;
+        resolveAttempts = 0;
+        resolveInFlight = false;
+        clearResolveRetryTimer();
         return;
       }
       if (parsed.type === 'command_result') {
@@ -813,7 +1070,7 @@ async function init() {
       // Keep compatibility with plain text messages.
     }
 
-    log(`Message from "${origin}": ${message}`);
+    log(`Message from "${origin}": ${String(message || '').length} bytes`);
   };
 
   el.keyboardCapture.addEventListener('beforeinput', async (event) => {
@@ -936,13 +1193,6 @@ async function init() {
       return;
     }
 
-    if (swipeStart && event.pointerType === 'touch' && swipeTarget === 'video') {
-      const currentDist = Math.hypot(event.clientX - swipeStart.x, event.clientY - swipeStart.y);
-      if (currentDist > 8) {
-        log(`Touch move on VIDEO: (${Math.round(event.clientX)}, ${Math.round(event.clientY)}) dist=${Math.round(currentDist)}`);
-      }
-    }
-
     if (activePointerStart) {
       const dx = event.clientX - activePointerStart.x;
       const dy = event.clientY - activePointerStart.y;
@@ -951,11 +1201,7 @@ async function init() {
       }
     }
 
-    try {
-      await sendMappedMouseCommand('mouse_move', event, { isDragging: true });
-    } catch {
-      // Keep drag move lightweight.
-    }
+    queueDragMove(event, { isDragging: true });
   });
 
   el.remoteVideo.addEventListener('pointerup', async (event) => {
@@ -1003,6 +1249,7 @@ async function init() {
     activePointerStart = null;
     isMousePressed = false;
     touchPressPending = false;
+    await flushPendingDragMove();
 
     // Only send to daemon if touch was on video, not on scrollbar
     if (currentSwipeTarget !== 'scrollbar' || !wasTouch) {
@@ -1033,6 +1280,7 @@ async function init() {
       if (event.pointerType === 'touch') {
         touchPressPending = false;
       }
+      clearPendingDragMove();
       return;
     }
 
@@ -1040,6 +1288,7 @@ async function init() {
     activePointerStart = null;
     isMousePressed = false;
     touchPressPending = false;
+    await flushPendingDragMove();
 
     // Only send to daemon if touch was on video
     if (currentSwipeTarget !== 'scrollbar' || event.pointerType !== 'touch') {
@@ -1072,6 +1321,14 @@ async function init() {
 
     event.preventDefault();
     try {
+      const videoRect = el.remoteVideo.getBoundingClientRect();
+      log(
+        `[DEBUG] click event - pointerType: ${event.pointerType} ` +
+        `raw coords: (${Math.round(event.clientX)}, ${Math.round(event.clientY)}) ` +
+        `video rect: (${Math.round(videoRect.left)}, ${Math.round(videoRect.top)}) ` +
+        `video size: ${Math.round(videoRect.width)}x${Math.round(videoRect.height)} ` +
+        `video source: ${el.remoteVideo.videoWidth}x${el.remoteVideo.videoHeight}`
+      );
       await sendMappedMouseCommand('mouse_click', event);
     } catch (error) {
       log(`mouse_click failed: ${error.message}`);
@@ -1427,22 +1684,22 @@ async function init() {
     }
   }, { passive: true });
 
-  window.addEventListener('pagehide', () => {
-    sendLeaveMessage('pagehide');
+  window.addEventListener('pagehide', async () => {
+    await sendLeaveMessage('pagehide');
   });
 
-  window.addEventListener('beforeunload', () => {
-    sendLeaveMessage('beforeunload');
+  window.addEventListener('beforeunload', async () => {
+    await sendLeaveMessage('beforeunload');
   });
 
   if (el.finishBtn) {
     el.finishBtn.addEventListener('click', async () => {
       try {
         await sendFinishMessage('button_click');
-        setStatus('connected', `Finish sent to daemon "${getDaemonId()}".`);
+        setClientState('daemonInteraction', `Finish sent to daemon "${getDaemonId()}".`);
         log(`Finish sent to daemon "${getDaemonId()}".`);
       } catch (error) {
-        setStatus('error', `Finish failed: ${error.message}`);
+        setClientState('daemonDisconnected', `Finish failed: ${error.message}`);
         log(`Finish failed: ${error.message}`);
       }
     });
@@ -1461,7 +1718,7 @@ async function init() {
     }, { passive: true });
   }
 
-  setStatus('connecting', `Connecting to signaling for daemon "${getDaemonId()}"...`);
+  setClientState('owtConnecting', `Connecting to signaling for daemon "${getDaemonId()}"...`);
   log(`Auto-connecting to signaling server "${getSignalingUrl()}" for daemon "${getDaemonId()}".`);
 
   try {
@@ -1473,23 +1730,35 @@ async function init() {
       ...summarizeIceConfigForLog(rtcOptions),
     });
 
-    await client.connect({
+    client.connect({
       signalingHost: getSignalingUrl(),
       clientId: getClientId(),
       daemonId: getDaemonId(),
-      forceReconnect: true,
       ...rtcOptions,
+    }).then(() => {
+      connected = true;
+      leaveSent = false;
+      messageChannelReady = true;
+      clearResolveRetryTimer();
+      setClientState('owtConnected', `Connected to signaling for daemon "${getDaemonId()}". Waiting for daemon_online...`);
+
+      // Fallback path: if daemon_online is delayed/dropped, initiate resolve from client side.
+      // This keeps session startup deterministic across signaling/server timing differences.
+      window.setTimeout(() => {
+        if (!connected || resolveSent || resolveAcked) {
+          return;
+        }
+        void sendResolve('client-connect-fallback');
+      }, 2000);
+
+      log('Client connect() promise resolved.');
+    }).catch((error) => {
+      setClientState('owtDisconnected', `Client connect() failed: ${error.message}`);
+      log(`Client connect() failed: ${error.message}`);
     });
-    connected = true;
-    leaveSent = false;
-    resolveAttempts = 0;
-    clearResolveRetryTimer();
-    setStatus('connected', `Connected to signaling for daemon "${getDaemonId()}". Waiting for data channel...`);
-    log('Connected to signaling and daemon peer endpoint.');
-    void sendResolve('connect-success');
   } catch (error) {
-    setStatus('error', `Connect failed: ${error.message}`);
-    log(`Connect failed: ${error.message}`);
+    setClientState('owtDisconnected', `Connect setup failed: ${error.message}`);
+    log(`Connect setup failed: ${error.message}`);
     return;
   }
 

@@ -29,18 +29,29 @@ Node.js pnpm workspace for an agentic browser P2P system with three sub-projects
 
 1. Install dependencies:
    - If Chromium download is blocked in your network, set env then install:
-     - PowerShell: `$env:PUPPETEER_SKIP_DOWNLOAD='true'; pnpm install`
+     ```bash
+     export PUPPETEER_SKIP_DOWNLOAD=true
+     pnpm install
+     ```
    - Otherwise:
-     - `pnpm install`
+     ```bash
+     pnpm install
+     ```
 2. Prepare daemon runtime env:
-   - PowerShell: `Copy-Item packages/daemon/.env.example packages/daemon/.env`
-   - Edit `packages/daemon/.env` with your local values.
+   ```bash
+   cp packages/daemon/.env.example packages/daemon/.env
+   # Edit packages/daemon/.env with your local values
+   ```
 3. Prepare client runtime env:
-   - PowerShell: `Copy-Item packages/client/.env.example packages/client/.env`
-   - Edit `packages/client/.env` with your local values.
+   ```bash
+   cp packages/client/.env.example packages/client/.env
+   # Edit packages/client/.env with your local values
+   ```
 4. Prepare agent runtime env:
-   - PowerShell: `Copy-Item packages/agent/.env.example packages/agent/.env`
-   - Edit `packages/agent/.env` with your local values.
+   ```bash
+   cp packages/agent/.env.example packages/agent/.env
+   # Edit packages/agent/.env with your local values
+   ```
 
 ## Start External OWT Signaling Server
 
@@ -49,131 +60,249 @@ Node.js pnpm workspace for an agentic browser P2P system with three sub-projects
    - `node src/index.js`
 2. Keep it running (default plain URL is `http://localhost:8095`, secure URL is `https://localhost:8096`).
 
+## Setup STUN and TURN Servers (Optional)
+
+For production or network scenarios where direct P2P is blocked, configure STUN/TURN servers using **coturn** on Ubuntu:
+
+1. Install coturn:
+   ```bash
+   sudo apt-get update
+   sudo apt-get install coturn
+   ```
+
+2. Create coturn config file (e.g., `/etc/coturn/turnserver.conf`):
+   ```bash
+   sudo tee /etc/coturn/turnserver.conf > /dev/null << 'EOF'
+   listening-port=80
+   tls-listening-port=443
+   proto=tcp
+   alt-listening-port=3478
+   alt-tls-listening-port=5349
+   listening-ip=0.0.0.0
+   min-port=49152
+   max-port=65535
+   fingerprint
+   lt-cred-mech
+   user=username:key
+   realm=example.com
+   cert=/et/turn_server_cert.pem
+   pkey=/etc/turn_server_pkey.pem
+   log-file=/var/log/coturn/turnserver.log
+   no-multicast-peers
+   no-rfc5780
+   no-stun-backward-compatibility
+   response-origin-only-with-rfc5780
+   EOF
+   ```
+
+3. Start coturn:
+   ```bash
+   sudo systemctl start coturn
+   sudo systemctl enable coturn  # Enable on boot
+   ```
+
+4. Configure STUN/TURN in client and daemon:
+   - Pass as URL params: `?stunUrls=stun:YOUR_STUN_SERVER:3478&turnUrls=turn:YOUR_TURN_SERVER:3478&turnUsername=username&turnCredential=password`
+   - Or set in `.env` files:
+     - `packages/client/.env`: `STUN_SERVER_URLS`, `TURN_SERVER_URLS`, `TURN_USERNAME`, `TURN_CREDENTIAL`
+     - `packages/daemon/.env`: Same environment variables
+   - Or in runtime config JSON files (`client-demo.runtime.json`, `daemon-agent.config.json`)
+
 ## Run
 
-1. Start daemon static server and peer page runtime:
-   - `pnpm start:daemon`
+The daemon is started via CLI by the agent orchestrator. There are two runtime modes:
+
+### Mode 1: Remote DevTools (Attach to Existing Chrome)
+
+Use this when Chrome is already running with `--remote-debugging-port` enabled.
+
+**Setup:**
+1. Pre-launch Chrome with remote debugging enabled:
+   ```bash
+   google-chrome \
+     --remote-debugging-port=9222 \
+     --user-data-dir=/tmp/chrome-profile \
+     --allow-http-screen-capture \
+     --auto-select-tab-capture-source-by-title \
+     --auto-select-desktop-capture-source
+   ```
+
 2. Start client demo static server:
-   - `pnpm start:client`
-3. Start standalone agent static server:
-   - `pnpm start:agent`
-4. Open daemon peer page URL printed by daemon startup (default `http://127.0.0.1:8788/daemon-agent.html?...`).
-5. In daemon peer page:
-   - Ensure signaling host points to your OWT signaling server (for example `http://localhost:8095`).
-   - Click `Connect`, then click `Share Screen` and choose the browser tab/page that will receive remote input.
-6. Open client demo URL printed by client startup (default `http://127.0.0.1:5174/client.html`).
-7. Open agent page URL printed by agent startup (default `http://127.0.0.1:5175/agent.html`).
-8. In agent page:
-   - Ensure `Daemon API URL` points to daemon static server (`http://localhost:8788`).
-   - Use `Launch Chrome`, `Open Target`, `Take Action`, `Start Sharing`, `Stop Sharing`, `Close Page`, and `Exit Chrome`.
-9. In client demo:
-   - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`).
-   - Ensure `Daemon API URL` points to daemon static server (`http://localhost:8788`).
-   - Click `Connect`.
-   - Use viewer mouse and text controls to send commands to daemon.
-   - Drag operations are supported through the shared viewer using `mouse_down`, `mouse_move`, and `mouse_up` command replay.
+   ```bash
+   pnpm start:client
+   ```
 
-## Alternative Dev Mode
+3. Start daemon via CLI with `--remote-debugging-port`:
+   ```bash
+   node packages/daemon/src/cli.js \
+     --daemonId daemon-1 \
+     --clientId client-1 \
+     --remote-debugging-port 9222 \
+     --signalingServer http://localhost:8095 \
+     --targetUrl http://localhost:5174/target-demo.html
+   ```
 
-- `pnpm dev:daemon`: runs daemon process.
-- `pnpm dev:client`: runs Vite dev server for client demo (default `http://localhost:5173`).
-- `pnpm dev:agent`: runs agent static server.
-- `pnpm dev`: runs daemon, client, and agent together.
+4. Open client demo URL:
+   - Default: `http://127.0.0.1:5174/client.html`
+   - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
+   - Ensure `Daemon API URL` points to daemon static server (`http://localhost:8788`)
+   - Click `Connect` and use controls to interact with the target
+
+### Mode 2: Puppeteer (Auto-launch Chrome)
+
+Use this when you want the daemon to launch Chrome automatically via Puppeteer.
+
+**Setup:**
+1. Start client demo static server:
+   ```bash
+   pnpm start:client
+   ```
+
+2. Start daemon via CLI without `--remote-debugging-port`:
+   ```bash
+   node packages/daemon/src/cli.js \
+     --daemonId daemon-1 \
+     --clientId client-1 \
+     --signalingServer http://localhost:8095 \
+     --targetUrl http://localhost:5174/target-demo.html
+   ```
+
+3. Daemon automatically launches Chrome, opens daemon-agent page, and opens target page
+
+4. Open client demo URL:
+   - Default: `http://127.0.0.1:5174/client.html`
+   - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
+   - Ensure `Daemon API URL` points to daemon static server (`http://localhost:8788`)
+   - Click `Connect` and use controls to interact with the target
+
+**Mode Behavior:**
+- **remote-devtools**: Daemon exits but preserves Chrome and target page (useful for manual inspection)
+- **putter**: Daemon closes Chrome and target page on exit (clean shutdown)
+
+## Headless Mode for Full Page Capture
+
+For production or resource-constrained environments, enable headless mode to capture the full target page without UI overhead.
+
+**Configuration (in `.env`):**
+```bash
+BROWSER_HEADLESS=true
+TARGET_PAGE_WIDTH=1920
+TARGET_PAGE_HEIGHT=1080
+```
+
+**How it works:**
+1. Chrome launches without GUI (no window displayed)
+2. Viewport is explicitly set to capture full page width
+3. Target page scales down (via CSS `transform: scale(0.9)`) to fit viewport without horizontal scrolling
+4. Client receives scrollable video stream of the entire page
+5. Mobile client can scroll vertically to view all content
+
+**Key features:**
+- Full page width is guaranteed to be visible (no horizontal scroll on client)
+- Vertical scroll allows viewing entire page height
+- GPU not required (runs on servers without display)
+- Ideal for headless server deployments
+
+**Test headless mode:**
+```bash
+BROWSER_HEADLESS=true TARGET_PAGE_WIDTH=1920 TARGET_PAGE_HEIGHT=1080 \
+node packages/daemon/src/cli.js \
+  --daemonId daemon-1 \
+  --clientId client-1 \
+  --signalingServer http://localhost:8095 \
+  --targetUrl http://localhost:5174/target-demo.html
+```
+
+**Viewport Customization:**
+- `TARGET_PAGE_WIDTH=2560 TARGET_PAGE_HEIGHT=1440` for higher resolution captures
+- `TARGET_PAGE_WIDTH=1280 TARGET_PAGE_HEIGHT=720` for lower bandwidth
+- Page scaling in `target-demo.html` CSS adjusts automatically based on viewport
+
+## Development Mode
+
+Run development servers with live reload:
+
+```bash
+# Run all services together
+pnpm dev
+
+# Or run individually
+pnpm dev:daemon      # Daemon with auto-restart
+pnpm dev:client      # Vite dev server (http://localhost:5173)
+pnpm dev:agent       # Agent static server
+```
 
 ## Core flow
 
 ```mermaid
 sequenceDiagram
-participant Agent
-participant Daemon
-participant Client
+    participant Agent
+    participant Daemon
+    participant DaemonAgent as Daemon-Agent Page
+    participant Signal as OWT Signaling
+    participant Client
 
-Agent->>Daemon: POST /api/v1/session/start
-Daemon->>Daemon: launch_chrome + open_daemon_agent_page + open_target_page
+    Note over Agent,Client: Agent provides session info (signalingServer, daemonId, clientId) to Client out-of-band
 
-rect rgb(219, 234, 254)
-Note over Agent,Daemon: Session Bootstrap
-Daemon->>Daemon: connect_to_signalServer + wait_client_resolve
-end
-Daemon-->>Agent: Status/query APIs reflect bridge + runtime state
+    par User opens mobile client page (can be before daemon starts)
+        Client->>Signal: Connect to OWT signaling server
+    end
 
-Agent->>Client: Provide client URL / session info
-Client->>Client: Open client page and connect to signaling
-Client->>Daemon: Send Resolve over OWT data channel
-Daemon->>Daemon: Handle Resolve and publish screen share stream
-Client->>Client: Receive stream and enable remote interaction
+    Agent->>Daemon: Start via CLI (daemonId, clientId, targetUrl, timeout)
 
-loop User interaction session
-Client->>Daemon: Send mouse/keyboard/text commands over data channel
-Daemon->>Daemon: Replay commands on controlled target page (Puppeteer)
-Daemon-->>Client: Send command_result messages
-end
+    alt remote-debugging-port provided and Chrome already running
+        Daemon->>Daemon: Attach to existing Chrome (remote-devtools mode)
+    else otherwise
+        Daemon->>Daemon: Launch new Chrome via Puppeteer (putter mode)
+    end
 
-alt Timeout
-Daemon->>Daemon: Capture timeout snapshot and mark stage=finish,status=timeout
-else Finish message
-Client->>Daemon: Send Finish over OWT data channel
-Daemon->>Daemon: Capture finish snapshot and mark stage=finish,status=success
-end
+    Daemon->>DaemonAgent: Open daemon-agent page in Chrome
+    Daemon->>Daemon: Open controlled target page in Chrome
+    DaemonAgent->>Signal: Connect to OWT signaling server
 
-Client->>Daemon: Send Leave when client page closes/navigates away (best-effort)
+    loop retry on timeout (2s deadline,  5 attempts)
+        Client->>DaemonAgent: Send Resolve over OWT data channel
+        DaemonAgent-->>Client: Send resolve_ack (acknowledgment)
+    end
 
+    DaemonAgent->>DaemonAgent: Capture and publish screen share stream (getDisplayMedia)
+    DaemonAgent-->>Client: Send resolve_result (ok or error)
+    Client->>Client: Receive video stream, enable remote interaction
+
+    loop User interaction session
+        Client->>DaemonAgent: Send mouse/keyboard/text commands (binary-encoded) over data channel
+        DaemonAgent->>Daemon: Forward command to Puppeteer via REST bridge
+        Daemon->>Daemon: Replay command on controlled target page
+        DaemonAgent-->>Client: Send command_result over data channel
+    end
+
+    alt Client page closes or navigates away
+        Client->>DaemonAgent: Send Leave (best-effort, 500ms window)
+        DaemonAgent->>Signal: Disconnect from signaling
+        Daemon->>Daemon: Capture leave snapshot
+        Daemon->>Agent: Session completes with outcome=leave
+    else User clicks Finish button
+        Client->>DaemonAgent: Send Finish over data channel
+        DaemonAgent->>Signal: Disconnect from signaling
+        Daemon->>Daemon: Capture finish snapshot
+        Daemon->>Agent: Session completes with outcome=success
+    else No client message within timeout window
+        Daemon->>Daemon: Capture timeout snapshot
+        Daemon->>Client: Send timeout_notice over data channel
+        Daemon->>Agent: Session completes with outcome=timeout
+    end
+
+    alt remote-devtools mode
+        Daemon->>Daemon: Exit daemon process, preserve Chrome and target page
+    else putter mode
+        Daemon->>Daemon: Close target page and Chrome, then exit
+    end
 ```
 
 ## Refactoring Notes
 
 - Client-side viewer geometry and mouse-command helpers were moved from the demo into `packages/client/src/sdk/viewerUtils.js` and re-exported by `packages/client/src/sdk/index.js`.
 - Agent control actions are maintained in the standalone `packages/agent` package.
-
-## Daemon REST API Overview
-
-Daemon now exposes REST APIs on the static server (default `http://localhost:8788`) for Agent-driven orchestration:
-
-- `POST /api/v1/chrome/launch`
-  - Launches (or reuses) the daemon browser runtime through Puppeteer.
-  - Optional body can include Chrome executable path and launch args.
-- `POST /api/v1/session/start`
-  - Unified session flow API:
-    - Launches Chrome if needed.
-    - Opens/re-opens daemon-agent page and target page.
-    - Connects signaling and waits for client `Resolve` (or early `Finish` terminal event).
-    - After resolve, daemon-agent publishes shared target and command replay continues over OWT data channel.
-    - Applies timeout-based snapshot and finish/timeout stage transition for this session.
-- `POST /api/v1/page/open`
-  - Opens or navigates the daemon-controlled target page.
-  - For agent workflow, this also prepares daemon-agent session context.
-- `GET /api/v1/page/snapshot`
-  - Captures current target page as `image/png` for agent analysis.
-  - Optional query params: `fullPage=true`, `clipX`, `clipY`, `clipWidth`, `clipHeight`.
-- `POST /api/v1/page/snapshot`
-  - Same snapshot API with JSON body options.
-  - Example body: `{ "fullPage": true }` or clipped region fields.
-- `POST /api/v1/action/connect`
-  - Primary "Take Action" endpoint.
-  - Updates daemon-agent session (IDs, signaling, ICE), performs signaling connect-only.
-- `POST /api/v1/share/start`
-  - Starts share flow by enqueueing daemon-agent connect + share.
-  - Useful when you want immediate publish without separate connect step.
-- `POST /api/v1/share/stop`
-  - Stops active sharing by enqueueing daemon-agent disconnect.
-  - Call `share/start` again for a fresh share session after stop.
-- `POST /api/v1/page/close`
-  - Closes the currently controlled target page.
-- `POST /api/v1/chrome/exit`
-  - Exits Puppeteer-launched browser process and clears active browser/page state.
-- `GET /api/v1/status`
-  - Returns daemon runtime snapshot (browser/page state, target status, and bridge state).
-  - Includes `activeSession.stage` and `activeSession.status` when using tool-mode session flow.
-  - Includes session diagnostics such as resolve/finish timestamps and snapshot metadata.
-
-Daemon tool mode (`awe-daemon`) can be started with CLI params directly, for example:
-
-- `node packages/daemon/src/index.js --daemon-id daemon-1 --client-id client-1 --target-url https://example.com`
-- Add `--json-compact` for single-line JSON output that is easy for agentic tooling to parse.
-
-Internally, daemon-agent page polls `/api/v1/agent/commands` and reports execution via `/api/v1/agent/events`.
-
-Runnable curl workflow example is available at `tests/scripts/daemon-rest-api-curl.sh`.
 
 ## Notes
 

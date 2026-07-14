@@ -8,6 +8,11 @@ const logger = createLogger('browser-controller');
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const AUTO_SHARE_SOURCE_TITLE = String(process.env.DAEMON_AUTO_SHARE_SOURCE_TITLE || 'Agentic Browser Target').trim();
+// Simulated display size used as the base/ceiling for the shared viewport. window.screen.width/
+// height/availWidth/availHeight cannot be trusted in headless Chrome (see optimizeViewportForPageSize),
+// so instead of reading a "screen size" from the page, we explicitly emulate one via CDP.
+const SIMULATED_DISPLAY_WIDTH = 1920;
+const SIMULATED_DISPLAY_HEIGHT = 1080;
 
 function normalizeRemoteDebuggingPort(value) {
   if (value === undefined || value === null || value === '') {
@@ -72,12 +77,13 @@ function resolveDefaultCacheDir() {
 }
 
 function isDaemonAgentUrl(url = '') {
-  return /\/daemon-agent\.html(?:[?#]|$)/i.test(String(url || ''));
+  return /\/(daemon-agent|daemon-cli)\.html(?:[?#]|$)/i.test(String(url || ''));
 }
 
 function mapRemoteCoordinatesLegacy(payload = {}, { targetWidth = 1, targetHeight = 1 } = {}) {
-  const sourceWidth = Math.max(1, Number(payload.sourceWidth || targetWidth || 1));
-  const sourceHeight = Math.max(1, Number(payload.sourceHeight || targetHeight || 1));
+  // Support both compact (sx/sy) and legacy (sourceWidth/sourceHeight) formats
+  const sourceWidth = Math.max(1, Number(payload.sx ?? payload.sourceWidth ?? targetWidth ?? 1));
+  const sourceHeight = Math.max(1, Number(payload.sy ?? payload.sourceHeight ?? targetHeight ?? 1));
   const resolvedTargetWidth = Math.max(1, Number(targetWidth || 1));
   const resolvedTargetHeight = Math.max(1, Number(targetHeight || 1));
   const x = Number(payload.x || 0);
@@ -100,8 +106,10 @@ function mapRemoteCoordinates(payload = {}, { targetWidth = 1, targetHeight = 1 
 }
 
 export class BrowserController {
-  constructor({ headless = false } = {}) {
+  constructor({ headless = false, maxPageWidth = 3840, maxPageHeight = 2160 } = {}) {
     this.headless = headless;
+    this.maxPageWidth = Math.max(640, maxPageWidth);
+    this.maxPageHeight = Math.max(480, maxPageHeight);
     this.browser = null;
     this.page = null;
     this.targetPage = null;
@@ -128,6 +136,10 @@ export class BrowserController {
     this.browserConnectionMode = 'none';
     this.remoteAttachAttempted = false;
     this.remoteAttachConnected = false;
+    // Cache for source dimensions with validation
+    this.lastSourceDimensions = { width: 0, height: 0, timestamp: 0, sequence: 0 };
+    // Cache for target page viewport (avoids CDP round-trip per mouse_move)
+    this.lastViewportDimensions = { width: 0, height: 0, pageUrl: '', timestamp: 0 };
   }
 
   buildDefaultLaunchArgs(remoteDebuggingPort = null) {
@@ -458,6 +470,9 @@ export class BrowserController {
     if (!this.page || (typeof this.page.isClosed === 'function' && this.page.isClosed())) {
       this.page = await this.browser.newPage();
       await this.page.setUserAgent('agentic-browser-daemon');
+      // No viewport set here: the daemon control page is never shared or measured,
+      // so its viewport size is irrelevant. Only the target page's viewport matters
+      // (see optimizeViewportForPageSize()).
     }
     return this.page;
   }
@@ -467,6 +482,10 @@ export class BrowserController {
     if (!this.targetPage || (typeof this.targetPage.isClosed === 'function' && this.targetPage.isClosed())) {
       this.targetPage = await this.browser.newPage();
       await this.targetPage.setUserAgent('agentic-browser-target');
+      // No initial viewport set here: every caller that creates a brand-new target page
+      // goes through openTarget(), which immediately calls optimizeViewportForPageSize()
+      // afterward and unconditionally applies the correct baseline/optimal viewport via
+      // CDP + setViewport. Setting a viewport here would just be overwritten right away.
     }
     return this.targetPage;
   }
@@ -518,6 +537,10 @@ export class BrowserController {
         document.title = title;
       }
     }, AUTO_SHARE_SOURCE_TITLE);
+    
+    // Optimize viewport based on actual page size before screen sharing
+    await this.optimizeViewportForPageSize(page);
+    
     try {
       await page.bringToFront();
     } catch (error) {
@@ -557,32 +580,114 @@ export class BrowserController {
       return { x: Number(payload.x || 0), y: Number(payload.y || 0) };
     }
 
-    const viewport = await page.evaluate(() => ({
-      width: window.innerWidth || document.documentElement.clientWidth || 1,
-      height: window.innerHeight || document.documentElement.clientHeight || 1,
-    }));
+    // Update source dimension cache if provided in payload
+    const providedSx = Number(payload.sx ?? 0);
+    const providedSy = Number(payload.sy ?? 0);
+    const hasNewDimensions = (providedSx > 0 && providedSy > 0);
+    
+    if (hasNewDimensions) {
+      // Check if dimensions changed (possible resolution change or new stream)
+      const dimensionChanged = 
+        providedSx !== this.lastSourceDimensions.width || 
+        providedSy !== this.lastSourceDimensions.height;
+      
+      if (dimensionChanged) {
+        logger.debug('Source dimension cache updated', {
+          old: this.lastSourceDimensions,
+          new: { width: providedSx, height: providedSy },
+        });
+      }
+      
+      // Update cache with new dimensions and sequence number for freshness tracking
+      this.lastSourceDimensions = {
+        width: providedSx,
+        height: providedSy,
+        timestamp: Date.now(),
+        sequence: (this.lastSourceDimensions.sequence || 0) + 1,
+      };
+    }
+    
+    // Use cached dimensions if not provided in payload (common for mouse_move)
+    // BUT: Only use cache if it has valid dimensions AND is not too stale (>30sec)
+    const cacheAge = Date.now() - this.lastSourceDimensions.timestamp;
+    const cacheIsStale = cacheAge > 30000;  // 30 second staleness threshold
+    
+    let effectivePayload = { ...payload };
+    
+    if (!effectivePayload.sx && this.lastSourceDimensions.width > 0 && !cacheIsStale) {
+      effectivePayload.sx = this.lastSourceDimensions.width;
+    }
+    if (!effectivePayload.sy && this.lastSourceDimensions.height > 0 && !cacheIsStale) {
+      effectivePayload.sy = this.lastSourceDimensions.height;
+    }
+    
+    // If cache is stale or empty, warn but don't fail silently
+    if (!effectivePayload.sx || !effectivePayload.sy) {
+      if (cacheIsStale && this.lastSourceDimensions.width > 0) {
+        logger.warn('Using stale dimension cache (>30s old)', {
+          age: cacheAge,
+          cached: this.lastSourceDimensions,
+        });
+      }
+      if (!this.lastSourceDimensions.width) {
+        logger.warn('No valid cached dimensions available', {
+          sequence: this.lastSourceDimensions.sequence,
+          coordinate: { x: effectivePayload.x, y: effectivePayload.y },
+        });
+      }
+    }
+
+    const VIEWPORT_CACHE_TTL_MS = 5000;
+    const currentPageUrl = page.url ? page.url() : '';
+    const viewportCacheAge = Date.now() - this.lastViewportDimensions.timestamp;
+    const viewportCacheValid =
+      this.lastViewportDimensions.width > 0 &&
+      this.lastViewportDimensions.pageUrl === currentPageUrl &&
+      viewportCacheAge < VIEWPORT_CACHE_TTL_MS;
+
+    let viewport;
+    if (viewportCacheValid) {
+      viewport = { width: this.lastViewportDimensions.width, height: this.lastViewportDimensions.height };
+    } else {
+      viewport = await page.evaluate(() => ({
+        width: window.innerWidth || document.documentElement.clientWidth || 1,
+        height: window.innerHeight || document.documentElement.clientHeight || 1,
+      }));
+      this.lastViewportDimensions = {
+        width: viewport.width,
+        height: viewport.height,
+        pageUrl: currentPageUrl,
+        timestamp: Date.now(),
+      };
+    }
 
     const viewportContext = {
       targetWidth: viewport.width,
       targetHeight: viewport.height,
     };
-    const mapped = mapRemoteCoordinates(payload, viewportContext);
+    const mapped = mapRemoteCoordinates(effectivePayload, viewportContext);
     const hasViewportMapping =
-      Number.isFinite(Number(payload.viewWidth)) && Number(payload.viewWidth) > 0 &&
-      Number.isFinite(Number(payload.viewHeight)) && Number(payload.viewHeight) > 0;
+      Number.isFinite(Number(effectivePayload.viewWidth)) && Number(effectivePayload.viewWidth) > 0 &&
+      Number.isFinite(Number(effectivePayload.viewHeight)) && Number(effectivePayload.viewHeight) > 0;
 
     if (hasViewportMapping) {
-      const legacyMapped = mapRemoteCoordinatesLegacy(payload, viewportContext);
+      const legacyMapped = mapRemoteCoordinatesLegacy(effectivePayload, viewportContext);
       logger.debug('resolveTargetCoordinates mapping comparison', {
         source: {
-          x: Number(payload.x || 0),
-          y: Number(payload.y || 0),
+          x: Number(effectivePayload.x || 0),
+          y: Number(effectivePayload.y || 0),
         },
         viewport: {
-          viewScrollLeft: Number(payload.viewScrollLeft || 0),
-          viewScrollTop: Number(payload.viewScrollTop || 0),
-          viewWidth: Number(payload.viewWidth || 0),
-          viewHeight: Number(payload.viewHeight || 0),
+          viewScrollLeft: Number(effectivePayload.viewScrollLeft || 0),
+          viewScrollTop: Number(effectivePayload.viewScrollTop || 0),
+          viewWidth: Number(effectivePayload.viewWidth || 0),
+          viewHeight: Number(effectivePayload.viewHeight || 0),
+        },
+        cache: {
+          width: this.lastSourceDimensions.width,
+          height: this.lastSourceDimensions.height,
+          age: cacheAge,
+          sequence: this.lastSourceDimensions.sequence,
         },
         mappedViewportAware: mapped,
         mappedLegacy: legacyMapped,
@@ -594,6 +699,74 @@ export class BrowserController {
     }
 
     return mapped;
+  }
+
+  async optimizeViewportForPageSize(page) {
+    try {
+      // window.screen.availWidth/availHeight cannot be trusted here: it reflects Chromium's
+      // emulated "screen" descriptor, which is independent of the real rendering
+      // viewport/window and is NOT updated by launch flags like --window-size=1920,1080.
+      // In headless mode it commonly stays stuck at a bogus 800x600.
+      //
+      // Instead of reading a screen size from the page, explicitly SIMULATE one via CDP's
+      // Emulation.setDeviceMetricsOverride (screenWidth/screenHeight), which Puppeteer's
+      // high-level page.setViewport() does not set on its own. This also fixes the separate
+      // issue where a reused/attached page (picked up via hydrateKnownPages()) never gets
+      // ensureTargetPage()'s baseline viewport, since we apply it here unconditionally.
+      const baselineWidth = Math.max(1, Math.min(this.maxPageWidth, SIMULATED_DISPLAY_WIDTH));
+      const baselineHeight = Math.max(1, Math.min(this.maxPageHeight, SIMULATED_DISPLAY_HEIGHT));
+
+      try {
+        const cdpSession = await page.createCDPSession();
+        await cdpSession.send('Emulation.setDeviceMetricsOverride', {
+          width: baselineWidth,
+          height: baselineHeight,
+          deviceScaleFactor: 1,
+          mobile: false,
+          screenWidth: baselineWidth,
+          screenHeight: baselineHeight,
+        });
+        await cdpSession.detach();
+      } catch (cdpError) {
+        logger.warn(`Failed to simulate display size via CDP: ${cdpError.message}`);
+      }
+
+      // Keep Puppeteer's own viewport tracking (page.viewport()) in sync with the CDP override.
+      await page.setViewport({ width: baselineWidth, height: baselineHeight });
+
+      // Measure actual page content dimensions
+      const pageDimensions = await page.evaluate(() => ({
+        scrollWidth: document.scrollingElement?.scrollWidth || document.body.scrollWidth || 0,
+        scrollHeight: document.scrollingElement?.scrollHeight || document.body.scrollHeight || 0,
+      }));
+
+      const actualWidth = Math.max(1, pageDimensions.scrollWidth || 0);
+      const actualHeight = Math.max(1, pageDimensions.scrollHeight || 0);
+
+      // The simulated display size (baselineWidth/baselineHeight) is the base/ceiling for the
+      // viewport: shrink to fit smaller content, but never exceed the simulated display or the
+      // configured max limits.
+      const optimalWidth = Math.min(actualWidth, this.maxPageWidth, baselineWidth);
+      const optimalHeight = Math.min(actualHeight, this.maxPageHeight, baselineHeight);
+
+      logger.info(`Optimizing viewport for page size`, {
+        simulatedDisplay: { width: baselineWidth, height: baselineHeight },
+        actualSize: { width: actualWidth, height: actualHeight },
+        maxLimit: { width: this.maxPageWidth, height: this.maxPageHeight },
+        optimalSize: { width: optimalWidth, height: optimalHeight },
+      });
+
+      // Set viewport to optimal size
+      await page.setViewport({ width: optimalWidth, height: optimalHeight });
+      
+      // Wait for layout/reflow after viewport change
+      await page.waitForFunction(() => document.readyState === 'complete', { timeout: 2000 }).catch(() => {
+        // Ignore timeout, proceed anyway
+      });
+    } catch (error) {
+      logger.warn(`Failed to optimize viewport for page size: ${error.message}`);
+      // Continue anyway, use current viewport
+    }
   }
 
   async prepareTargetPage() {
@@ -632,7 +805,17 @@ export class BrowserController {
       return { ok: false, error: 'No Puppeteer target page is open.', bridge: 'puppeteer' };
     }
 
-    const page = await this.prepareTargetPage();
+    // Mouse input commands are high-frequency and must not call bringToFront on every event.
+    // Use getActiveControlPage() (sync, no IPC) for all pointer/keyboard operations.
+    // prepareTargetPage() (which calls bringToFront) is only needed for structural commands.
+    const isFastMouseCommand = type === 'mouse_move' || type === 'mouse_down' || type === 'mouse_up' || type === 'mouse_click';
+    const page = isFastMouseCommand
+      ? this.getActiveControlPage()
+      : await this.prepareTargetPage();
+
+    if (!page) {
+      return { ok: false, error: 'No active page available for command.', bridge: 'puppeteer' };
+    }
 
     switch (type) {
       case 'close_page':

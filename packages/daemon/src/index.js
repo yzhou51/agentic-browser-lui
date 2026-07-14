@@ -10,12 +10,17 @@ import { CommandProcessor } from './daemon/commandProcessor.js';
 import { createToolModeRuntime, PutterMode, RemoteDevtoolsMode } from './daemon/toolMode.js';
 import { createLogger } from './logger.js';
 import { startStaticServer } from './server.js';
+import { createPeerIds } from '../../client/src/sdk/peerIds.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const logger = createLogger('daemon-runtime');
 
-const browser = new BrowserController({ headless: false });
+const browser = new BrowserController({
+  headless: config.browserHeadless,
+  maxPageWidth: config.targetPageWidthMax,
+  maxPageHeight: config.targetPageHeightMax,
+});
 const commands = new CommandProcessor(browser);
 const agentBridge = new AgentControlBridge({
   initialState: {
@@ -149,10 +154,17 @@ function parseAweDaemonToolOptions(argv = []) {
   }
 
   const payload = {
-    daemonId: options.daemonId,
-    clientId: options.clientId,
     targetUrl: options.targetUrl,
+    sessionId: options.sessionId,
   };
+
+  payload.sessionId = String(payload.sessionId || '').trim();
+
+  if (payload.sessionId) {
+    const derived = createPeerIds(payload.sessionId);
+    payload.daemonId = payload.daemonId || derived.daemonId;
+    payload.clientId = payload.clientId || derived.clientId;
+  }
 
   if (!payload.daemonId || !payload.clientId || !payload.targetUrl) {
     return null;
@@ -160,9 +172,6 @@ function parseAweDaemonToolOptions(argv = []) {
 
   if (options.timeout !== undefined) {
     payload.timeout = Number(options.timeout);
-  }
-  if (options.sessionId !== undefined) {
-    payload.sessionId = String(options.sessionId || '').trim();
   }
   if (options.signalingServer !== undefined) {
     payload.signalingServer = String(options.signalingServer || '').trim();
@@ -278,6 +287,89 @@ function completeSession(outcome, statusMessage = '') {
     statusMessage,
     completedAt: activeSession.completedAt,
   });
+}
+
+function enqueueTerminalNotice(type, {
+  clientId = '',
+  message = '',
+  status = '',
+  outcome = '',
+  stage = SESSION_STAGES.FINISH,
+} = {}) {
+  const targetId = String(clientId || activeSession.clientId || '').trim();
+  if (!targetId) {
+    return null;
+  }
+
+  return agentBridge.enqueue('send_peer_notice', {
+    targetId,
+    type,
+    requestId: `${type}-${Date.now()}`,
+    message,
+    payload: {
+      clientId: targetId,
+      sessionId: activeSession.id,
+      stage,
+      status,
+      outcome,
+      completedAt: Date.now(),
+    },
+  });
+}
+
+async function handleTerminationMessage(options = {}) {
+  const {
+    expectedActiveClientId,
+    messageOrigin,
+    payloadClientId,
+    outcome,
+    statusMessage,
+    snapshotPrefix,
+    sendNotice = false,
+    updateSessionState = null, // function to update activeSession state
+  } = options;
+
+  const originMatchesActiveClient = normalizeId(messageOrigin) && expectedActiveClientId && normalizeId(messageOrigin) === expectedActiveClientId;
+  const payloadMatchesActiveClient = normalizeId(payloadClientId) && expectedActiveClientId && normalizeId(payloadClientId) === expectedActiveClientId;
+  const accepted = Boolean(originMatchesActiveClient || payloadMatchesActiveClient || (activeSession.id && !activeSession.completedAt));
+
+  if (!accepted) {
+    return false;
+  }
+
+  // Update session state if needed
+  if (updateSessionState) {
+    updateSessionState();
+  }
+
+  // Capture snapshot
+  try {
+    const snapshot = await browser.saveTargetSnapshotToFile({
+      fullPage: true,
+      outputDir: config.timeoutSnapshotDir,
+      fileNamePrefix: snapshotPrefix,
+    });
+    rememberTimeoutSnapshot(snapshot, outcome);
+  } catch (error) {
+    logger.warn(`Failed to capture ${outcome} snapshot.`, {
+      error: error.message,
+    });
+  }
+
+  // Complete session
+  completeSession(outcome, statusMessage);
+
+  // Send terminal notice if requested
+  if (sendNotice) {
+    enqueueTerminalNotice(`${outcome}_ack`, {
+      clientId: activeSession.clientId,
+      message: activeSession.statusMessage,
+      status: activeSession.status,
+      outcome: activeSession.outcome,
+    });
+  }
+
+  return true;
 }
 
 function waitForSessionCompletion(timeoutMs = 0) {
@@ -547,6 +639,12 @@ function armClientMessageTimeout(reason = 'init', timeoutMsOverride = null) {
 
     if (activeSession.id) {
       completeSession('timeout', `Session timed out after ${Math.max(1, Math.floor(timeoutMs / 1000))} seconds.`);
+      enqueueTerminalNotice('timeout_notice', {
+        clientId: activeSession.clientId,
+        message: activeSession.statusMessage,
+        status: activeSession.status,
+        outcome: activeSession.outcome,
+      });
     }
   }, timeoutMs);
 }
@@ -563,16 +661,25 @@ async function waitForAgentOnline(timeoutMs = 12000) {
 }
 
 async function startSessionWorkflow(payload = {}) {
-  const daemonId = String(payload.daemonId || '').trim();
-  const clientId = String(payload.clientId || '').trim();
+  const requestedSessionId = String(payload.sessionId || '').trim();
+  let daemonId = String(payload.daemonId || '').trim();
+  let clientId = String(payload.clientId || '').trim();
+  if ((!daemonId || !clientId) && requestedSessionId) {
+    const derived = createPeerIds(requestedSessionId);
+    daemonId = daemonId || derived.daemonId;
+    clientId = clientId || derived.clientId;
+  }
+
   const targetUrl = String(payload.targetUrl || '').trim();
   if (!daemonId || !clientId || !targetUrl) {
     throw new Error('daemonId, clientId, and targetUrl are required.');
   }
 
-  const sessionId = String(payload.sessionId || '').trim() || createSessionId();
+  const sessionId = requestedSessionId || createSessionId();
   const timeoutSeconds = parseTimeoutSeconds(payload.timeout, Math.max(1, Math.floor((config.clientMessageTimeoutMs || 120000) / 1000)));
   const timeoutMs = timeoutSeconds * 1000;
+  const agentPageNameRaw = String(payload.agentPage || '').trim().toLowerCase();
+  const agentPageName = agentPageNameRaw === 'daemon-cli.html' ? 'daemon-cli.html' : 'daemon-agent.html';
   const signalingServer = String(payload.signalingServer || session.signalingServer || config.signalingServer || '').trim();
   const stunUrls = normalizeIceUrlList(payload.stunUrls).length
     ? normalizeIceUrlList(payload.stunUrls)
@@ -641,7 +748,7 @@ async function startSessionWorkflow(payload = {}) {
     config.staticServerHost === '0.0.0.0' || config.staticServerHost === '::'
       ? 'localhost'
       : config.staticServerHost;
-  const daemonAgentUrl = new URL(`http://${openHost}:${config.staticServerPort}/daemon-agent.html`);
+  const daemonAgentUrl = new URL(`http://${openHost}:${config.staticServerPort}/${agentPageName}`);
   daemonAgentUrl.searchParams.set('uid', daemonId);
   daemonAgentUrl.searchParams.set('remote', clientId);
   daemonAgentUrl.searchParams.set('host', signalingServer);
@@ -680,19 +787,6 @@ async function startSessionWorkflow(payload = {}) {
 
   updateSessionProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'running', 'connecting to signaling server');
   const requestId = `${sessionId}-connect`;
-  const setSessionCommand = agentBridge.enqueue('set_session', {
-    daemonId,
-    clientId,
-    signalingServer,
-    stunUrls,
-    turnUrls,
-    turnUsername,
-    turnCredential,
-  });
-  const disconnectCommand = agentBridge.enqueue('disconnect', {
-    reason: 'session_start_reset',
-    requestId,
-  });
   const connectCommand = agentBridge.enqueue('connect_only', {
     daemonId,
     clientId,
@@ -702,36 +796,26 @@ async function startSessionWorkflow(payload = {}) {
     turnUsername,
     turnCredential,
     requestId,
-    forceReconnect: true,
   });
 
   armClientMessageTimeout('session_start', timeoutMs);
 
   updateSessionProgress(SESSION_STAGES.WAIT_CLIENT_RESOLVE, 'running', 'waiting for client resolve');
-  let completionDuringStart = null;
   let waitResult = null;
   try {
-    const readyOrCompletion = await waitForSessionReadyOrCompletion(timeoutMs + 500);
-    if (readyOrCompletion.kind === 'ready') {
-      waitResult = readyOrCompletion.data;
-      updateSessionProgress(SESSION_STAGES.USER_INTERACTION, 'running', 'user interaction phase');
-    } else {
-      completionDuringStart = readyOrCompletion.data;
-      logger.info('Session completed before resolve.', {
-        sessionId,
-        outcome: completionDuringStart.outcome,
-        status: completionDuringStart.status,
-      });
-    }
+    waitResult = await waitForSessionReady(timeoutMs + 500);
+    updateSessionProgress(SESSION_STAGES.USER_INTERACTION, 'running', 'user interaction phase');
   } catch (error) {
-    if (!/Timed out waiting for session readiness or completion/i.test(String(error?.message || ''))) {
+    if (!/Timed out waiting for client connection and resolve message/i.test(String(error?.message || ''))) {
       throw error;
     }
-    logger.warn('Session resolve wait timed out; awaiting timeout completion status.', {
+    logger.warn('Session resolve wait timed out; awaiting completion status.', {
       sessionId,
       timeoutSeconds,
     });
   }
+
+  const completion = await waitForSessionCompletion(timeoutMs + 1500);
 
   return {
     ok: true,
@@ -747,7 +831,7 @@ async function startSessionWorkflow(payload = {}) {
     turnCredential,
     launch: launchResult,
     openTarget: openTargetResult,
-    commandIds: [setSessionCommand.id, disconnectCommand.id, connectCommand.id],
+    commandIds: [connectCommand.id],
     wait: {
       connected: Boolean(waitResult?.connectedAt || activeSession.connected),
       resolveReceived: Boolean(waitResult?.resolveAt || activeSession.resolved),
@@ -755,7 +839,8 @@ async function startSessionWorkflow(payload = {}) {
       resolveAt: waitResult?.resolveAt || activeSession.lastResolveAt || 0,
       resolveFrom: waitResult?.resolveFrom || activeSession.lastResolveFrom || '',
     },
-    completedDuringStart: completionDuringStart,
+    completion,
+    agentPage: agentPageName,
     flow: {
       interaction: 'Client sends mouse/keyboard/text over data channel; daemon-agent replays to Puppeteer target.',
       timeoutSnapshot: `Timeout (${timeoutSeconds}s) captures snapshot and returns timeout status.`,
@@ -783,15 +868,18 @@ if (process.argv.length > 2 && !toolModePayload) {
 } else {
   const publicDir = path.resolve(__dirname, '../public');
   const browserModuleDir = path.resolve(__dirname, './daemon');
+  const clientSdkDir = path.resolve(__dirname, '../../client/src/sdk');
   const openHost =
     config.staticServerHost === '0.0.0.0' || config.staticServerHost === '::'
       ? 'localhost'
       : config.staticServerHost;
   const daemonAgentUrl = `http://${openHost}:${config.staticServerPort}/daemon-agent.html?uid=${encodeURIComponent(session.daemonId)}&remote=${encodeURIComponent(session.clientId)}`;
+  const daemonCliUrl = `http://${openHost}:${config.staticServerPort}/daemon-cli.html?uid=${encodeURIComponent(session.daemonId)}&remote=${encodeURIComponent(session.clientId)}&host=${encodeURIComponent(session.signalingServer)}`;
 
   const server = await startStaticServer({
     rootDir: publicDir,
     browserModuleDir,
+    clientSdkDir,
     host: config.staticServerHost,
     port: config.staticServerPort,
     getDaemonAgentConfig: () => ({
@@ -889,6 +977,13 @@ if (process.argv.length > 2 && !toolModePayload) {
       }
       if (kind === 'peer_message') {
         const rawMessage = String(event?.message || '');
+        const messageBytes = (() => {
+          try {
+            return new TextEncoder().encode(rawMessage).length;
+          } catch {
+            return rawMessage.length;
+          }
+        })();
         let parsedType = '';
         let parsedRequestId = '';
         let parsedPayload = null;
@@ -905,7 +1000,7 @@ if (process.argv.length > 2 && !toolModePayload) {
           origin: String(event?.origin || ''),
           type: parsedType,
           requestId: parsedRequestId,
-          message: rawMessage,
+          bytes: messageBytes,
         });
 
         const payloadClientId = String(
@@ -918,6 +1013,10 @@ if (process.argv.length > 2 && !toolModePayload) {
         const payloadMatchesSessionClient = normalizeId(payloadClientId) && normalizeId(expectedClientId) && normalizeId(payloadClientId) === normalizeId(expectedClientId);
 
         if (originMatchesSessionClient || payloadMatchesSessionClient) {
+          if (!activeSession.connected) {
+            activeSession.connected = true;
+            activeSession.connectedAt = Date.now();
+          }
           armClientMessageTimeout('peer_message', currentClientMessageTimeoutMs);
           logger.debug('Client message timeout reset from peer message.', {
             origin: messageOrigin,
@@ -930,6 +1029,10 @@ if (process.argv.length > 2 && !toolModePayload) {
           const originMatchesActiveClient = normalizeId(messageOrigin) && expectedActiveClientId && normalizeId(messageOrigin) === expectedActiveClientId;
           const payloadMatchesActiveClient = normalizeId(payloadClientId) && expectedActiveClientId && normalizeId(payloadClientId) === expectedActiveClientId;
           if (originMatchesActiveClient || payloadMatchesActiveClient) {
+            if (!activeSession.connected) {
+              activeSession.connected = true;
+              activeSession.connectedAt = Date.now();
+            }
             activeSession.resolved = true;
             activeSession.lastResolveAt = Date.now();
             activeSession.lastResolveFrom = messageOrigin || payloadClientId;
@@ -940,34 +1043,24 @@ if (process.argv.length > 2 && !toolModePayload) {
             origin: String(event?.origin || ''),
             payloadClientId,
             requestId: parsedRequestId,
-            message: rawMessage,
+            bytes: messageBytes,
           });
         } else if (parsedType === 'finish') {
           const expectedActiveClientId = normalizeId(activeSession.clientId);
-          const originMatchesActiveClient = normalizeId(messageOrigin) && expectedActiveClientId && normalizeId(messageOrigin) === expectedActiveClientId;
-          const payloadMatchesActiveClient = normalizeId(payloadClientId) && expectedActiveClientId && normalizeId(payloadClientId) === expectedActiveClientId;
           const earlyFinishForActiveSession = Boolean(activeSession.id && !activeSession.completedAt);
-          const acceptedFinish = Boolean(originMatchesActiveClient || payloadMatchesActiveClient || earlyFinishForActiveSession);
-
-          if (acceptedFinish) {
-            activeSession.lastFinishAt = Date.now();
-            activeSession.lastFinishFrom = messageOrigin || payloadClientId;
-
-            try {
-              const snapshot = await browser.saveTargetSnapshotToFile({
-                fullPage: true,
-                outputDir: config.timeoutSnapshotDir,
-                fileNamePrefix: `finish-${activeSession.clientId || 'client'}`,
-              });
-              rememberTimeoutSnapshot(snapshot, 'finish');
-            } catch (error) {
-              logger.warn('Failed to capture finish snapshot.', {
-                error: error.message,
-              });
-            }
-
-            completeSession('success', 'Finish message received. Session completed successfully.');
-          }
+          const acceptedFinish = await handleTerminationMessage({
+            expectedActiveClientId,
+            messageOrigin,
+            payloadClientId,
+            outcome: 'success',
+            statusMessage: 'Finish message received. Session completed successfully.',
+            snapshotPrefix: `finish-${activeSession.clientId || 'client'}`,
+            sendNotice: true,
+            updateSessionState: () => {
+              activeSession.lastFinishAt = Date.now();
+              activeSession.lastFinishFrom = messageOrigin || payloadClientId;
+            },
+          });
 
           logger.info('FINISH_RECEIVED', {
             origin: String(event?.origin || ''),
@@ -975,13 +1068,53 @@ if (process.argv.length > 2 && !toolModePayload) {
             acceptedFinish,
             earlyFinishForActiveSession,
             requestId: parsedRequestId,
-            message: rawMessage,
+            bytes: messageBytes,
+          });
+        } else if (parsedType === 'leave') {
+          const expectedActiveClientId = normalizeId(activeSession.clientId);
+          const acceptedLeave = await handleTerminationMessage({
+            expectedActiveClientId,
+            messageOrigin,
+            payloadClientId,
+            outcome: 'leave',
+            statusMessage: 'Leave message received from client. Session ended by client disconnect.',
+            snapshotPrefix: `leave-${activeSession.clientId || 'client'}`,
+            sendNotice: false,
+            updateSessionState: null,
+          });
+
+          logger.info('LEAVE_RECEIVED', {
+            origin: String(event?.origin || ''),
+            payloadClientId,
+            acceptedLeave,
+            requestId: parsedRequestId,
+            bytes: messageBytes,
+          });
+        } else if (parsedType === 'timeout') {
+          const expectedActiveClientId = normalizeId(activeSession.clientId);
+          const acceptedTimeout = await handleTerminationMessage({
+            expectedActiveClientId,
+            messageOrigin,
+            payloadClientId,
+            outcome: 'timeout',
+            statusMessage: 'Timeout message received from client. Session ended by timeout event.',
+            snapshotPrefix: `timeout-${activeSession.clientId || 'client'}`,
+            sendNotice: true,
+            updateSessionState: null,
+          });
+
+          logger.info('TIMEOUT_RECEIVED', {
+            origin: String(event?.origin || ''),
+            payloadClientId,
+            acceptedTimeout,
+            requestId: parsedRequestId,
+            bytes: messageBytes,
           });
         } else if (parsedType === 'connect_only') {
           logger.info('TAKE_ACTION_CONNECT_ONLY_RECEIVED', {
             origin: String(event?.origin || ''),
             requestId: parsedRequestId,
-            message: rawMessage,
+            bytes: messageBytes,
           });
         }
 
@@ -989,16 +1122,17 @@ if (process.argv.length > 2 && !toolModePayload) {
         return;
       }
       if (kind === 'peer_command_result') {
+        const resultType = String(event?.type || '').trim().toLowerCase();
         logger.debug('daemon-agent peer command result', {
           requestId: String(event?.requestId || ''),
-          type: String(event?.type || ''),
+          type: resultType,
           ok: event?.ok !== false,
           message: String(event?.message || ''),
           error: String(event?.error || ''),
           bridge: String(event?.bridge || ''),
         });
 
-        if (String(event?.type || '') === 'resolve') {
+        if (resultType === 'resolve') {
           if (event?.ok !== false) {
             logger.info('RESOLVE_SHARE_STARTED', {
               requestId: String(event?.requestId || ''),
@@ -1010,7 +1144,7 @@ if (process.argv.length > 2 && !toolModePayload) {
               error: String(event?.error || ''),
             });
           }
-        } else if (String(event?.type || '') === 'connect_only') {
+        } else if (resultType === 'connect_only') {
           if (event?.ok !== false) {
             logger.info('TAKE_ACTION_SIGNALING_CONNECTED', {
               requestId: String(event?.requestId || ''),
@@ -1031,7 +1165,8 @@ if (process.argv.length > 2 && !toolModePayload) {
     },
     isAgentOnline: () => agentBridge.isOnline(10000),
     bootstrapAgentBridge: async () => {
-      const targetUrl = `http://${openHost}:${config.staticServerPort}/daemon-agent.html?uid=${encodeURIComponent(session.daemonId)}&remote=${encodeURIComponent(session.clientId)}&host=${encodeURIComponent(session.signalingServer)}`;
+      const pageName = toolModePayload ? 'daemon-cli.html' : 'daemon-agent.html';
+      const targetUrl = `http://${openHost}:${config.staticServerPort}/${pageName}?uid=${encodeURIComponent(session.daemonId)}&remote=${encodeURIComponent(session.clientId)}&host=${encodeURIComponent(session.signalingServer)}`;
       await commands.handle({ type: 'open_url', payload: { url: targetUrl } });
     },
   });
@@ -1102,7 +1237,20 @@ if (process.argv.length > 2 && !toolModePayload) {
   logger.info(`Using external OWT signaling server: ${session.signalingServer}`);
   logger.info(`Daemon static server running: http://${config.staticServerHost}:${config.staticServerPort}`);
   logger.info(`Open daemon peer page: ${daemonAgentUrl}`);
+  logger.info(`Open daemon CLI page: ${daemonCliUrl}`);
   logger.info(`Daemon log level: ${config.daemonLogLevel}`);
+
+  if (!toolModePayload) {
+    try {
+      await commands.handle({ type: 'launch_chrome' });
+      await commands.handle({ type: 'open_url', payload: { url: daemonCliUrl } });
+      logger.info('Opened daemon CLI page on startup.');
+    } catch (error) {
+      logger.warn('Failed to auto-open daemon CLI page on startup.', {
+        error: error?.message || String(error || ''),
+      });
+    }
+  }
 
   if (toolModePayload) {
     logger.info('awe-daemon tool mode started', {
@@ -1114,7 +1262,10 @@ if (process.argv.length > 2 && !toolModePayload) {
     });
 
     try {
-      const startResult = await startSessionWorkflow(toolModePayload);
+      const startResult = await startSessionWorkflow({
+        ...toolModePayload,
+        agentPage: 'daemon-cli.html',
+      });
       const toolModeRuntime = createToolModeRuntime({
         browser,
         logger,
