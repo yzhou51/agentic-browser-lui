@@ -18,6 +18,7 @@ const logger = createLogger('daemon-runtime');
 
 const browser = new BrowserController({
   headless: config.browserHeadless,
+  enableHeadlessCalibration: config.enableHeadlessCalibration,
   maxPageWidth: config.targetPageWidthMax,
   maxPageHeight: config.targetPageHeightMax,
 });
@@ -1242,6 +1243,25 @@ if (process.argv.length > 2 && !toolModePayload) {
   logger.info(`Open daemon peer page: ${daemonAgentUrl}`);
   logger.info(`Open daemon CLI page: ${daemonCliUrl}`);
   logger.info(`Daemon log level: ${config.daemonLogLevel}`);
+  logger.info('[MODE] Effective browser mode', {
+    env: {
+      BROWSER_HEADLESS: String(process.env.BROWSER_HEADLESS || ''),
+      DAEMON_CHROME_REMOTE_DEBUGGING_PORT: String(process.env.DAEMON_CHROME_REMOTE_DEBUGGING_PORT || ''),
+    },
+    config: {
+      browserHeadless: config.browserHeadless,
+      targetPageWidthMax: config.targetPageWidthMax,
+      targetPageHeightMax: config.targetPageHeightMax,
+    },
+    session: {
+      headless: session.headless,
+    },
+    browserController: {
+      headless: browser.headless,
+      mode: browser.mode,
+      connectionMode: browser.browserConnectionMode,
+    },
+  });
 
   if (!toolModePayload) {
     try {

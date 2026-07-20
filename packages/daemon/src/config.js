@@ -15,6 +15,22 @@ function readPositiveInt(value, fallback) {
   return Math.floor(parsed);
 }
 
+function readBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
 const clientMessageTimeoutSeconds = readPositiveInt(process.env.DAEMON_CLIENT_MESSAGE_TIMEOUT_SECONDS, 120);
 
 export const config = {
@@ -28,6 +44,7 @@ export const config = {
   staticServerHost: process.env.DAEMON_STATIC_HOST || '0.0.0.0',
   staticServerPort: Number(process.env.DAEMON_STATIC_PORT || 8788),
   browserHeadless: (process.env.BROWSER_HEADLESS || 'false').toLowerCase() === 'true',
+  enableHeadlessCalibration: readBoolean(process.env.DAEMON_ENABLE_HEADLESS_CALIBRATION, true),
   targetPageWidthMax: readPositiveInt(process.env.TARGET_PAGE_WIDTH_MAX, 3840), // 4K default
   targetPageHeightMax: readPositiveInt(process.env.TARGET_PAGE_HEIGHT_MAX, 2160), // 4K default
   daemonLogLevel: process.env.DAEMON_LOG_LEVEL || process.env.LOG_LEVEL || 'info',

@@ -4,6 +4,7 @@ import {
   createViewerMouseCommandSender,
   hasAnySearchParam,
   loadClientRuntimeConfig,
+  getRenderedVideoContentRect,
   readSearchParam,
   readSearchParamAny,
   readSearchPercentParam,
@@ -71,6 +72,7 @@ async function init() {
     terminalNotice: document.getElementById('terminalNotice'),
     remotePanel: document.querySelector('.mobile-remote-panel'),
     remoteVideo: document.getElementById('remoteVideo'),
+    calibrationVeil: document.getElementById('calibrationVeil'),
     hScrollOverlay: document.getElementById('hScrollOverlay'),
     hScrollThumb: document.getElementById('hScrollThumb'),
     vScrollOverlay: document.getElementById('vScrollOverlay'),
@@ -78,6 +80,15 @@ async function init() {
     keyboardFab: document.getElementById('keyboardFab'),
     keyboardCapture: document.getElementById('keyboardCapture'),
   };
+
+  function setCalibrationVeilVisible(visible) {
+    if (!el.calibrationVeil) {
+      return;
+    }
+
+    el.calibrationVeil.classList.toggle('is-visible', Boolean(visible));
+    el.calibrationVeil.setAttribute('aria-hidden', visible ? 'false' : 'true');
+  }
 
   const viewState = {
     scalePercent: 100,
@@ -559,26 +570,19 @@ async function init() {
       return {};
     }
 
+    const videoBox = getRenderedVideoContentRect(el.remoteVideo);
     const sourceWidth = Math.max(1, Number(el.remoteVideo.videoWidth || viewState.sourceWidth || 1));
     const sourceHeight = Math.max(1, Number(el.remoteVideo.videoHeight || viewState.sourceHeight || 1));
-    const renderedWidth = Math.max(1, el.remoteVideo.clientWidth || container.clientWidth || sourceWidth);
-    const renderedHeight = Math.max(1, el.remoteVideo.clientHeight || container.clientHeight || sourceHeight);
+    const renderedWidth = Math.max(1, videoBox.rect.width || container.clientWidth || sourceWidth);
+    const renderedHeight = Math.max(1, videoBox.rect.height || container.clientHeight || sourceHeight);
 
     // Calculate centering offset for letterboxing (aspect ratio mismatch)
     const containerAspect = renderedWidth / renderedHeight;
     const sourceAspect = sourceWidth / sourceHeight;
-    let contentWidth = renderedWidth;
-    let contentHeight = renderedHeight;
-
-    if (Number.isFinite(containerAspect) && Number.isFinite(sourceAspect) && sourceWidth > 0 && sourceHeight > 0) {
-      if (sourceAspect > containerAspect) {
-        // Source is wider: vertical letterbox (top/bottom black bars)
-        contentHeight = renderedWidth / sourceAspect;
-      } else {
-        // Source is taller: horizontal letterbox (left/right black bars)
-        contentWidth = renderedHeight * sourceAspect;
-      }
-    }
+    const contentWidth = Math.max(1, videoBox.contentWidth || renderedWidth);
+    const contentHeight = Math.max(1, videoBox.contentHeight || renderedHeight);
+    const offsetX = Math.max(0, videoBox.offsetX || 0);
+    const offsetY = Math.max(0, videoBox.offsetY || 0);
 
     const sourcePerCssX = sourceWidth / contentWidth;
     const sourcePerCssY = sourceHeight / contentHeight;
@@ -958,12 +962,15 @@ async function init() {
     onPointerMapped: (mapped, { type, pointerEvent, extraPayload }) => {
       if (type === 'mouse_click') {
         const viewportInfo = getViewportMappingPayload();
+        const videoBox = getRenderedVideoContentRect(el.remoteVideo);
         log(
           `[DEBUG] ${type} - raw: (${Math.round(pointerEvent.clientX)}, ${Math.round(pointerEvent.clientY)}) ` +
           `mapped: (${mapped.x}, ${mapped.y}) ` +
           `source: ${mapped.sourceWidth}x${mapped.sourceHeight} ` +
           `content: ${Math.round(mapped.contentRect.width)}x${Math.round(mapped.contentRect.height)} ` +
           `offset: (${mapped.contentRect.offsetX}, ${mapped.contentRect.offsetY}) ` +
+          `rendered: ${Math.round(videoBox.rect.width)}x${Math.round(videoBox.rect.height)} ` +
+          `renderedOffset: (${Math.round(videoBox.offsetX)}, ${Math.round(videoBox.offsetY)}) ` +
           `viewport: scroll(${viewportInfo.viewScrollLeft}, ${viewportInfo.viewScrollTop}) ` +
           `size(${viewportInfo.viewWidth}, ${viewportInfo.viewHeight})`
         );
@@ -1154,39 +1161,45 @@ async function init() {
         const markers = Array.isArray(parsed?.payload?.markers) ? parsed.payload.markers : [];
         log(`Calibration requested by daemon "${origin}" (${markers.length} markers).`);
         void (async () => {
+          setCalibrationVeilVisible(true);
           // Retry a few times with a short delay: the video element may not yet have
           // decoded/rendered a frame that actually contains the just-injected markers
           // (WebRTC first-frame latency can exceed a single detection attempt).
-          const maxAttempts = 4;
-          const retryDelayMs = 300;
-          let detection = { ok: false, error: 'not attempted' };
-          for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            // Only save a debug snapshot on the first attempt (and only when explicitly enabled
-            // via ?debugCalibrationFrame=1) to avoid spamming downloads during normal use.
-            const shouldSaveDebugFrame = attempt === 1 && hasAnySearchParam(searchParams, ['debugCalibrationFrame']);
-            detection = await detectCalibrationMarkers(markers, { saveDebugFrame: shouldSaveDebugFrame });
-            if (detection.ok) {
-              break;
-            }
-            log(`Calibration detection attempt ${attempt}/${maxAttempts} failed: ${detection.error}`);
-            if (attempt < maxAttempts) {
-              await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
-            }
-          }
-
-          if (!detection.ok) {
-            log(`Calibration detection failed after ${maxAttempts} attempts: ${detection.error}`);
-          } else {
-            log(`Calibration detection succeeded: ${JSON.stringify(detection.correspondences)}`);
-          }
           try {
-            await client.sendMessage({
-              type: 'calibrate_result',
-              requestId: parsed.requestId,
-              payload: detection,
-            });
-          } catch (error) {
-            log(`Calibration result send failed: ${error.message}`);
+            const maxAttempts = 4;
+            const retryDelayMs = 300;
+            let detection = { ok: false, error: 'not attempted' };
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+              // Only save a debug snapshot on the first attempt (and only when explicitly enabled
+              // via ?debugCalibrationFrame=1) to avoid spamming downloads during normal use.
+              const shouldSaveDebugFrame = attempt === 1 && hasAnySearchParam(searchParams, ['debugCalibrationFrame']);
+              detection = await detectCalibrationMarkers(markers, { saveDebugFrame: shouldSaveDebugFrame });
+              if (detection.ok) {
+                break;
+              }
+              log(`Calibration detection attempt ${attempt}/${maxAttempts} failed: ${detection.error}`);
+              if (attempt < maxAttempts) {
+                await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
+              }
+            }
+
+            if (!detection.ok) {
+              log(`Calibration detection failed after ${maxAttempts} attempts: ${detection.error}`);
+            } else {
+              log(`Calibration detection succeeded: ${JSON.stringify(detection.correspondences)}`);
+            }
+
+            try {
+              await client.sendMessage({
+                type: 'calibrate_result',
+                requestId: parsed.requestId,
+                payload: detection,
+              });
+            } catch (error) {
+              log(`Calibration result send failed: ${error.message}`);
+            }
+          } finally {
+            setCalibrationVeilVisible(false);
           }
         })();
         return;

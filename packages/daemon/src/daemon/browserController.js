@@ -276,13 +276,42 @@ function resolveCalibrationForSource(calibration, sx, sy) {
   };
 }
 
+async function readCaptureSurfaceDimensions(page) {
+  if (!page || typeof page.createCDPSession !== 'function') {
+    return null;
+  }
+
+  try {
+    const session = await page.createCDPSession();
+    const { windowId } = await session.send('Browser.getWindowForTarget');
+    const { bounds = {} } = await session.send('Browser.getWindowBounds', { windowId });
+    await session.detach();
+
+    const width = Number(bounds.width || 0);
+    const height = Number(bounds.height || 0);
+    if (!(width > 0) || !(height > 0)) {
+      return null;
+    }
+
+    return {
+      width,
+      height,
+      state: String(bounds.windowState || 'normal'),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export class BrowserController {
-  constructor({ headless = false, maxPageWidth = 3840, maxPageHeight = 2160 } = {}) {
+  constructor({ headless = false, enableHeadlessCalibration = true, maxPageWidth = 3840, maxPageHeight = 2160 } = {}) {
     this.headless = headless;
     // Explicit human-readable mode, derived from `headless`. Kept as the single source
     // of truth for gating headless-only behavior (e.g. dynamic click calibration) so
     // the proven headful mapping path is never touched.
     this.mode = headless ? 'headless' : 'headful';
+    // Default on; disable via DAEMON_ENABLE_HEADLESS_CALIBRATION=false when needed.
+    this.enableHeadlessCalibration = Boolean(enableHeadlessCalibration);
     this.maxPageWidth = Math.max(640, maxPageWidth);
     this.maxPageHeight = Math.max(480, maxPageHeight);
     this.browser = null;
@@ -329,6 +358,9 @@ export class BrowserController {
     this.lastSourceDimensions = { width: 0, height: 0, timestamp: 0, sequence: 0 };
     // Cache for target page viewport (avoids CDP round-trip per mouse_move)
     this.lastViewportDimensions = { width: 0, height: 0, pageUrl: '', timestamp: 0 };
+    // Cache for the actual browser window / capture surface.
+    this.lastCaptureSurfaceDimensions = { width: 0, height: 0, state: '', pageUrl: '', timestamp: 0 };
+    this.lastGeometrySnapshotSignature = '';
   }
 
   buildDefaultLaunchArgs(remoteDebuggingPort = null) {
@@ -544,6 +576,7 @@ export class BrowserController {
     const endpoint = await this.resolveBrowserWsEndpoint();
     if (!endpoint) {
       this.remoteAttachConnected = false;
+      logger.warn(`Attach to existing Chrome skipped: no DevTools WebSocket endpoint found on port ${this.remoteDebuggingPort} (checked http://127.0.0.1:${this.remoteDebuggingPort}/json/version and DevToolsActivePort file in ${this.userDataDir}). Falling back to launching a new Chrome without proxy/profile settings from the external process.`);
       return false;
     }
 
@@ -581,17 +614,19 @@ export class BrowserController {
     }
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 1200);
+    const timer = setTimeout(() => controller.abort(), 3000);
     try {
       const response = await fetch(`http://127.0.0.1:${this.remoteDebuggingPort}/json/version`, {
         signal: controller.signal,
       });
       if (!response.ok) {
+        logger.warn(`DevTools endpoint http://127.0.0.1:${this.remoteDebuggingPort}/json/version responded with HTTP ${response.status}.`);
         return '';
       }
       const data = await response.json();
       return String(data?.webSocketDebuggerUrl || '').trim();
-    } catch {
+    } catch (error) {
+      logger.warn(`Could not reach DevTools endpoint http://127.0.0.1:${this.remoteDebuggingPort}/json/version: ${error?.message || error}. Verify Chrome was started with --remote-debugging-port=${this.remoteDebuggingPort} and is reachable on 127.0.0.1 from this daemon process.`);
       return '';
     } finally {
       clearTimeout(timer);
@@ -855,6 +890,62 @@ export class BrowserController {
       targetHeight: viewport.height,
     };
 
+    const calibration = this.activeCalibration;
+    const currentSx = Number(effectivePayload.sx || 0);
+    const currentSy = Number(effectivePayload.sy || 0);
+
+    const captureSurfaceCacheAge = Date.now() - this.lastCaptureSurfaceDimensions.timestamp;
+    const captureSurfaceCacheValid =
+      this.lastCaptureSurfaceDimensions.width > 0 &&
+      this.lastCaptureSurfaceDimensions.pageUrl === currentPageUrl &&
+      captureSurfaceCacheAge < VIEWPORT_CACHE_TTL_MS;
+
+    let captureSurface = null;
+    if (captureSurfaceCacheValid) {
+      captureSurface = {
+        width: this.lastCaptureSurfaceDimensions.width,
+        height: this.lastCaptureSurfaceDimensions.height,
+        state: this.lastCaptureSurfaceDimensions.state,
+      };
+    } else {
+      captureSurface = await readCaptureSurfaceDimensions(page);
+      this.lastCaptureSurfaceDimensions = {
+        width: Number(captureSurface?.width || 0),
+        height: Number(captureSurface?.height || 0),
+        state: String(captureSurface?.state || ''),
+        pageUrl: currentPageUrl,
+        timestamp: Date.now(),
+      };
+    }
+
+    const geometrySnapshotSignature = [
+      this.headless ? 'headless' : 'headful',
+      `${viewportContext.targetWidth}x${viewportContext.targetHeight}`,
+      `${Number(captureSurface?.width || 0)}x${Number(captureSurface?.height || 0)}`,
+      `${currentSx}x${currentSy}`,
+    ].join('|');
+
+    if (geometrySnapshotSignature !== this.lastGeometrySnapshotSignature) {
+      logger.info('[GEOMETRY] Coordinate geometry snapshot', {
+        mode: this.mode,
+        headless: this.headless,
+        pageViewport: {
+          width: viewportContext.targetWidth,
+          height: viewportContext.targetHeight,
+        },
+        actualCaptureSurface: captureSurface ? {
+          width: captureSurface.width,
+          height: captureSurface.height,
+          state: captureSurface.state,
+        } : null,
+        encodedWebRtcFrame: {
+          width: currentSx,
+          height: currentSy,
+        },
+      });
+      this.lastGeometrySnapshotSignature = geometrySnapshotSignature;
+    }
+
     // Dynamic capture-to-content calibration (headless mode only). The naive proportional
     // mapping in mapRemoteCoordinates() assumes the captured video's pixels map 1:1
     // (proportionally) onto the page's rendered content, which holds true in headful mode
@@ -863,11 +954,8 @@ export class BrowserController {
     // it even if WebRTC has since changed the encoded resolution (e.g. bandwidth/CPU-driven
     // downscaling) -- see resolveCalibrationForSource() below. Any mismatch/absence safely
     // falls back to the existing proportional mapping used by headful mode.
-    const calibration = this.activeCalibration;
-    const currentSx = Number(effectivePayload.sx || 0);
-    const currentSy = Number(effectivePayload.sy || 0);
     const resolvedCalibration = resolveCalibrationForSource(calibration, currentSx, currentSy);
-    const useCalibration = this.headless && Boolean(resolvedCalibration);
+    const useCalibration = this.headless && this.enableHeadlessCalibration && Boolean(resolvedCalibration);
 
     if (this.headless && calibration && !resolvedCalibration) {
       // Calibration exists but was skipped for this event; this would otherwise silently
@@ -895,6 +983,8 @@ export class BrowserController {
     }
 
     let mapped;
+    let headfulCropGuardApplied = false;
+    let headfulCropGuardDetails = null;
     if (useCalibration) {
       const rawX = Number(effectivePayload.x || 0);
       const rawY = Number(effectivePayload.y || 0);
@@ -904,6 +994,55 @@ export class BrowserController {
       };
     } else {
       mapped = mapRemoteCoordinates(effectivePayload, viewportContext);
+
+      // Fallback crop guard: if encoded frame and page viewport aspect ratios diverge,
+      // but only one axis is being scaled up, treat that axis as likely cropped (not downscaled)
+      // and avoid amplifying coordinates there. This now applies in headless mode too, but only
+      // on the non-calibrated path (we are in the `else` branch where useCalibration is false).
+      if (currentSx > 0 && currentSy > 0) {
+        const targetWidth = Math.max(1, Number(viewportContext.targetWidth || 1));
+        const targetHeight = Math.max(1, Number(viewportContext.targetHeight || 1));
+        const sourceWidth = Math.max(1, Number(currentSx || 1));
+        const sourceHeight = Math.max(1, Number(currentSy || 1));
+
+        const scaleX = targetWidth / sourceWidth;
+        const scaleY = targetHeight / sourceHeight;
+        const sourceAspect = sourceWidth / sourceHeight;
+        const targetAspect = targetWidth / targetHeight;
+        const aspectDrift = Math.abs(sourceAspect - targetAspect) / Math.max(1e-6, targetAspect);
+
+        const inflationX = Math.max(0, scaleX - 1);
+        const inflationY = Math.max(0, scaleY - 1);
+        const oneAxisDominates = inflationX > inflationY * 1.5 || inflationY > inflationX * 1.5;
+        const shouldApplyCropGuard = aspectDrift > 0.04 && oneAxisDominates && Math.max(inflationX, inflationY) > 0.03;
+
+        if (shouldApplyCropGuard) {
+          const guardedScaleX = inflationX > inflationY * 1.5 ? 1 : scaleX;
+          const guardedScaleY = inflationY > inflationX * 1.5 ? 1 : scaleY;
+          const rawX = Number(effectivePayload.x || 0);
+          const rawY = Number(effectivePayload.y || 0);
+
+          mapped = {
+            x: Math.max(0, Math.min(targetWidth - 1, Math.round(rawX * guardedScaleX))),
+            y: Math.max(0, Math.min(targetHeight - 1, Math.round(rawY * guardedScaleY))),
+          };
+
+          headfulCropGuardApplied = true;
+          headfulCropGuardDetails = {
+            sourceWidth,
+            sourceHeight,
+            targetWidth,
+            targetHeight,
+            scaleX,
+            scaleY,
+            guardedScaleX,
+            guardedScaleY,
+            sourceAspect,
+            targetAspect,
+            aspectDrift,
+          };
+        }
+      }
     }
 
     logger.debug('resolveTargetCoordinates mapping decision', {
@@ -911,6 +1050,8 @@ export class BrowserController {
       calibrationActive: Boolean(calibration),
       usedCalibration: useCalibration,
       calibrationRescaled: Boolean(resolvedCalibration?.rescaled),
+      headfulCropGuardApplied,
+      headfulCropGuardDetails,
       raw: { x: Number(effectivePayload.x || 0), y: Number(effectivePayload.y || 0) },
       sourceDims: { sx: Number(effectivePayload.sx || 0), sy: Number(effectivePayload.sy || 0) },
       targetDims: viewportContext,
@@ -969,12 +1110,11 @@ export class BrowserController {
     // other times clipping enough of the top-left that even an 8%-inset marker misses. There is
     // no single "safe" pair of positions that reliably survives every crop.
     //
-    // Instead, inject a 3x3 GRID of uniquely-colored markers spread across the page (10/50/90%
-    // of width/height). Detection only needs >=2 of these to succeed (see setCalibration's
-    // least-squares fit, which uses however many correspondences are actually found), so as long
-    // as ANY two grid points survive whatever cropping occurs, calibration can still complete --
-    // regardless of which edge(s) get clipped.
-    const gridFractions = [0.1, 0.5, 0.9];
+    // Inject a top-heavy multi-row marker layout. Headless capture crops on mobile are often
+    // biased toward bottom clipping, so concentrating more anchors in the upper half increases
+    // the chance that >=2 markers survive even when lower rows are cut off.
+    const xFractions = [0.1, 0.33, 0.5, 0.67, 0.9];
+    const yFractions = [0.08, 0.18, 0.32, 0.52, 0.76];
     // Avoid colors that commonly collide with real page content: pure white/black (page
     // backgrounds/text), and "sky blue" ~(0,128,255) which sits within tolerance of the
     // extremely common Bootstrap/web link blue #007bff (0,123,255) -- both were observed in
@@ -992,15 +1132,36 @@ export class BrowserController {
       [255, 128, 0], // orange
       [128, 0, 255], // purple
       [128, 255, 0], // lime
+      [255, 64, 64], // coral
+      [64, 255, 64], // mint
+      [255, 192, 0], // amber
+      [192, 64, 255], // violet
+      [64, 255, 192], // aqua-mint
+      [255, 64, 192], // pink
+      [64, 192, 255], // azure
+      [192, 255, 64], // chartreuse
+      [255, 160, 64], // apricot
+      [160, 64, 255], // indigo
+      [64, 160, 255], // steel-cyan
+      [255, 96, 0], // vivid orange
+      [96, 255, 0], // vivid lime
+      [255, 0, 96], // vivid rose
+      [0, 255, 96], // vivid spring
+      [96, 0, 255], // vivid violet
     ];
+
+    const markerCount = xFractions.length * yFractions.length;
+    if (palette.length < markerCount) {
+      throw new Error(`Calibration marker palette too small: have ${palette.length}, need ${markerCount}.`);
+    }
 
     const markers = [];
     let colorIndex = 0;
-    for (const yFraction of gridFractions) {
-      for (const xFraction of gridFractions) {
+    for (const yFraction of yFractions) {
+      for (const xFraction of xFractions) {
         markers.push({
           id: `g${colorIndex}`,
-          color: palette[colorIndex % palette.length],
+          color: palette[colorIndex],
           domX: Math.max(markerSize / 2, Math.round(targetWidth * xFraction)),
           domY: Math.max(markerSize / 2, Math.round(targetHeight * yFraction)),
         });
@@ -1105,9 +1266,80 @@ export class BrowserController {
     const { scale: scaleX, offset: offsetX } = fitX;
     const { scale: scaleY, offset: offsetY } = fitY;
 
+    // Guard against pathological fits that can happen when marker matches are sparse/noisy.
+    // Applying such a calibration is worse than no calibration at all (it can collapse all
+    // clicks onto an edge or near-constant Y). Prefer safe fallback proportional mapping.
+    const minRequiredInliersPerAxis = validPoints.length >= 4 ? 3 : 2;
+    if (fitX.inlierCount < minRequiredInliersPerAxis || fitY.inlierCount < minRequiredInliersPerAxis) {
+      logger.warn('Rejected calibration: insufficient inliers after outlier rejection.', {
+        totalPoints: validPoints.length,
+        minRequiredInliersPerAxis,
+        xInlierCount: fitX.inlierCount,
+        yInlierCount: fitY.inlierCount,
+      });
+      return false;
+    }
+
     if (![scaleX, scaleY, offsetX, offsetY].every(Number.isFinite)) {
       logger.warn('Rejected calibration: computed scale/offset is not finite.', { scaleX, scaleY, offsetX, offsetY });
       return false;
+    }
+
+    if (scaleX <= 0 || scaleY <= 0) {
+      logger.warn('Rejected calibration: non-positive scale indicates invalid axis orientation.', {
+        scaleX,
+        scaleY,
+      });
+      return false;
+    }
+
+    // Keep calibration within a broad-but-finite practical range. Values outside this range
+    // indicate mismatched correspondences rather than real capture-to-page geometry.
+    if (scaleX < 0.2 || scaleX > 5 || scaleY < 0.2 || scaleY > 5) {
+      logger.warn('Rejected calibration: scale out of sane range.', {
+        scaleX,
+        scaleY,
+        allowedRange: { min: 0.2, max: 5 },
+      });
+      return false;
+    }
+
+    // Additional geometric sanity check against the current target viewport. Even if an axis
+    // scale is technically finite/positive, a bad correspondence subset can still produce a fit
+    // that maps the full source axis into only a tiny fraction of the page (or far beyond it),
+    // which causes severe click collapse (e.g. all Y values bunched near the top).
+    const viewport = this.targetPage?.viewport?.() || null;
+    const targetWidth = Math.max(1, Number(viewport?.width || 0));
+    const targetHeight = Math.max(1, Number(viewport?.height || 0));
+    const resolvedSourceWidth = Math.max(1, Number(sourceWidth) || 1);
+    const resolvedSourceHeight = Math.max(1, Number(sourceHeight) || 1);
+    if (targetWidth > 0 && targetHeight > 0) {
+      const projectedSpanX = Math.abs(scaleX) * resolvedSourceWidth;
+      const projectedSpanY = Math.abs(scaleY) * resolvedSourceHeight;
+      const spanRatioX = projectedSpanX / targetWidth;
+      const spanRatioY = projectedSpanY / targetHeight;
+
+      const minSpanRatio = 0.55;
+      const maxSpanRatio = 2.2;
+      if (
+        spanRatioX < minSpanRatio || spanRatioX > maxSpanRatio ||
+        spanRatioY < minSpanRatio || spanRatioY > maxSpanRatio
+      ) {
+        logger.warn('Rejected calibration: transformed source span is implausible for current viewport.', {
+          scaleX,
+          scaleY,
+          sourceWidth: resolvedSourceWidth,
+          sourceHeight: resolvedSourceHeight,
+          targetWidth,
+          targetHeight,
+          projectedSpanX,
+          projectedSpanY,
+          spanRatioX,
+          spanRatioY,
+          allowedSpanRatio: { min: minSpanRatio, max: maxSpanRatio },
+        });
+        return false;
+      }
     }
 
     if (fitX.outlierCount > 0 || fitY.outlierCount > 0) {

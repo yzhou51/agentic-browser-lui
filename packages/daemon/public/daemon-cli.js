@@ -38,6 +38,9 @@ async function loadRuntimeConfig() {
   let resolveSeen = false;
   let resolveInProgress = false;
   let pendingCalibrationRequestId = null;
+  let pendingCalibrationClientId = null;
+  let pendingCalibrationAttempt = 0;
+  const maxCalibrationAttempts = 2;
 
   function setStatus(text) {
     if (statusEl) {
@@ -148,17 +151,10 @@ async function loadRuntimeConfig() {
     return p2pClient.sendPeerMessage(targetId, message, options);
   }
 
-  async function runCalibration(clientId) {
-    if (!isHeadlessMode) {
-      return;
+  async function requestCalibrationFromClient(clientId, attempt, { settleDelayMs = 0 } = {}) {
+    if (settleDelayMs > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, settleDelayMs));
     }
-
-    // Give the WebRTC video pipeline time to establish and render at least one real
-    // frame after sharing starts (publish() completing does not mean the client has
-    // received/decoded any frames yet). Without this delay the calibration round trip
-    // can complete before the client's video shows anything, so injected markers are
-    // never actually visible in the captured frame.
-    await new Promise((resolve) => window.setTimeout(resolve, 800));
 
     try {
       const injectResult = await submitLocalDaemonCommand({ type: 'inject_calibration_markers', payload: {} });
@@ -170,6 +166,8 @@ async function loadRuntimeConfig() {
 
       const requestId = `calib-${Date.now()}`;
       pendingCalibrationRequestId = requestId;
+      pendingCalibrationClientId = clientId;
+      pendingCalibrationAttempt = attempt;
 
       await sendPeerMessage(
         clientId,
@@ -181,9 +179,12 @@ async function loadRuntimeConfig() {
         { label: 'calibrate_request' }
       );
 
-      appendMessage(`Calibration requested from client "${clientId}".`);
+      appendMessage(`Calibration requested from client "${clientId}" (attempt ${attempt}/${maxCalibrationAttempts}).`);
     } catch (error) {
       appendMessage(`Calibration request failed: ${error.message}`);
+      pendingCalibrationRequestId = null;
+      pendingCalibrationClientId = null;
+      pendingCalibrationAttempt = 0;
       try {
         await submitLocalDaemonCommand({ type: 'remove_calibration_markers', payload: {} });
       } catch {
@@ -192,33 +193,60 @@ async function loadRuntimeConfig() {
     }
   }
 
-  async function handleCalibrationResult(command) {
+  async function runCalibration(clientId) {
+    if (!isHeadlessMode) {
+      return;
+    }
+
+    // Give the WebRTC video pipeline time to establish and render at least one real
+    // frame after sharing starts (publish() completing does not mean the client has
+    // received/decoded any frames yet). Without this delay the calibration round trip
+    // can complete before the client's video shows anything, so injected markers are
+    // never actually visible in the captured frame.
+    await requestCalibrationFromClient(clientId, 1, { settleDelayMs: 800 });
+  }
+
+  async function handleCalibrationResult(incomingOrigin, command) {
     const payload = command?.payload || {};
     if (!pendingCalibrationRequestId || command.requestId !== pendingCalibrationRequestId) {
       return;
     }
+    const attempt = Math.max(1, Number(pendingCalibrationAttempt || 1));
+    const calibrationClientId = String(pendingCalibrationClientId || incomingOrigin || '').trim();
     pendingCalibrationRequestId = null;
+    pendingCalibrationClientId = null;
+    pendingCalibrationAttempt = 0;
 
     console.log('[daemon-cli] calibrate_result received', payload);
+    let retryConfig = null;
 
     try {
       if (payload.ok === false || !Array.isArray(payload.correspondences) || payload.correspondences.length < 2) {
-        appendMessage(`Calibration failed: ${payload.error || 'insufficient marker correspondences'}`);
-        return;
+        const failureReason = payload.error || 'insufficient marker correspondences';
+        if (attempt < maxCalibrationAttempts && calibrationClientId) {
+          appendMessage(`Calibration attempt ${attempt}/${maxCalibrationAttempts} failed: ${failureReason}. Retrying...`);
+          retryConfig = {
+            clientId: calibrationClientId,
+            attempt: attempt + 1,
+            settleDelayMs: 300,
+          };
+        } else {
+          appendMessage(`Calibration failed after ${attempt} attempt(s): ${failureReason}`);
+        }
+      } else {
+        appendMessage(`Calibration correspondences: ${JSON.stringify(payload.correspondences)}`);
+
+        const result = await submitLocalDaemonCommand({
+          type: 'set_calibration',
+          payload: {
+            correspondences: payload.correspondences,
+            sourceWidth: payload.sourceWidth,
+            sourceHeight: payload.sourceHeight,
+          },
+        });
+
+        appendMessage(result?.ok ? 'Calibration applied successfully.' : `Calibration rejected: ${result?.message || ''}`);
       }
-
-      appendMessage(`Calibration correspondences: ${JSON.stringify(payload.correspondences)}`);
-
-      const result = await submitLocalDaemonCommand({
-        type: 'set_calibration',
-        payload: {
-          correspondences: payload.correspondences,
-          sourceWidth: payload.sourceWidth,
-          sourceHeight: payload.sourceHeight,
-        },
-      });
-
-      appendMessage(result?.ok ? 'Calibration applied successfully.' : `Calibration rejected: ${result?.message || ''}`);
     } catch (error) {
       appendMessage(`Calibration apply failed: ${error.message}`);
     } finally {
@@ -227,6 +255,12 @@ async function loadRuntimeConfig() {
       } catch {
         // Ignore cleanup errors.
       }
+    }
+
+    if (retryConfig) {
+      await requestCalibrationFromClient(retryConfig.clientId, retryConfig.attempt, {
+        settleDelayMs: retryConfig.settleDelayMs,
+      });
     }
   }
 
@@ -594,7 +628,7 @@ async function loadRuntimeConfig() {
     }
 
     if (normalizedType === 'calibrate_result') {
-      await handleCalibrationResult(command);
+      await handleCalibrationResult(incomingOrigin, command);
       return;
     }
 

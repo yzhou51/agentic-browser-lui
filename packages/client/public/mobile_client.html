@@ -226,6 +226,28 @@
       pointer-events: none;
     }
 
+    .mobile-calibration-veil {
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(2, 6, 23, 0.9);
+      color: #e5e7eb;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      border-radius: 12px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 140ms ease;
+    }
+
+    .mobile-calibration-veil.is-visible {
+      opacity: 1;
+    }
+
     .mobile-v-scroll-thumb {
       position: absolute;
       top: 0;
@@ -381,6 +403,7 @@
         <div class="mobile-video-scroll">
           <video id="remoteVideo" class="mobile-video" autoplay playsinline muted tabindex="0"></video>
         </div>
+        <div id="calibrationVeil" class="mobile-calibration-veil" aria-live="polite" aria-hidden="true">Calibrating...</div>
         <div id="hScrollOverlay" class="mobile-h-scroll" aria-hidden="true">
           <div id="hScrollThumb" class="mobile-h-scroll-thumb"></div>
         </div>
