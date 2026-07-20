@@ -44,6 +44,7 @@ const session = {
   turnCredential: config.turnCredential,
   staticServerHost: config.staticServerHost,
   staticServerPort: config.staticServerPort,
+  headless: config.browserHeadless,
 };
 
 function normalizeIceUrlList(value) {
@@ -884,6 +885,7 @@ if (process.argv.length > 2 && !toolModePayload) {
     port: config.staticServerPort,
     getDaemonAgentConfig: () => ({
       ...session,
+      headless: config.browserHeadless,
       runtimeMode: browser.getRuntimeMode(),
       browserConnectionMode: browser.browserConnectionMode,
     }),
@@ -957,6 +959,7 @@ if (process.argv.length > 2 && !toolModePayload) {
             targetUrl: String(event?.state?.targetUrl || ''),
             targetDescriptor: String(event?.state?.targetDescriptor || ''),
             sharedTrackLabel: String(event?.state?.sharedTrackLabel || ''),
+            capturedResolution: event?.state?.capturedResolution || null,
           });
         }
         if (event.status === 'connected') {

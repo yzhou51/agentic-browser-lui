@@ -29,6 +29,7 @@ async function loadRuntimeConfig() {
   const turnCredentialInput = document.getElementById('turnCredential');
 
   const runtimeConfig = await loadRuntimeConfig();
+  const isHeadlessMode = Boolean(runtimeConfig.headless);
   let screenStream = null;
   let controlTargetMode = null;
   let agentCommandCursor = 0;
@@ -36,6 +37,7 @@ async function loadRuntimeConfig() {
   let daemonOnlineAnnounceTimer = null;
   let resolveSeen = false;
   let resolveInProgress = false;
+  let pendingCalibrationRequestId = null;
 
   function setStatus(text) {
     if (statusEl) {
@@ -144,6 +146,88 @@ async function loadRuntimeConfig() {
 
   async function sendPeerMessage(targetId, message, options) {
     return p2pClient.sendPeerMessage(targetId, message, options);
+  }
+
+  async function runCalibration(clientId) {
+    if (!isHeadlessMode) {
+      return;
+    }
+
+    // Give the WebRTC video pipeline time to establish and render at least one real
+    // frame after sharing starts (publish() completing does not mean the client has
+    // received/decoded any frames yet). Without this delay the calibration round trip
+    // can complete before the client's video shows anything, so injected markers are
+    // never actually visible in the captured frame.
+    await new Promise((resolve) => window.setTimeout(resolve, 800));
+
+    try {
+      const injectResult = await submitLocalDaemonCommand({ type: 'inject_calibration_markers', payload: {} });
+      const markers = Array.isArray(injectResult?.markers) ? injectResult.markers : [];
+      if (!markers.length) {
+        appendMessage('Calibration skipped: no markers were injected.');
+        return;
+      }
+
+      const requestId = `calib-${Date.now()}`;
+      pendingCalibrationRequestId = requestId;
+
+      await sendPeerMessage(
+        clientId,
+        {
+          type: 'calibrate_request',
+          requestId,
+          payload: { markers },
+        },
+        { label: 'calibrate_request' }
+      );
+
+      appendMessage(`Calibration requested from client "${clientId}".`);
+    } catch (error) {
+      appendMessage(`Calibration request failed: ${error.message}`);
+      try {
+        await submitLocalDaemonCommand({ type: 'remove_calibration_markers', payload: {} });
+      } catch {
+        // Ignore cleanup errors.
+      }
+    }
+  }
+
+  async function handleCalibrationResult(command) {
+    const payload = command?.payload || {};
+    if (!pendingCalibrationRequestId || command.requestId !== pendingCalibrationRequestId) {
+      return;
+    }
+    pendingCalibrationRequestId = null;
+
+    console.log('[daemon-cli] calibrate_result received', payload);
+
+    try {
+      if (payload.ok === false || !Array.isArray(payload.correspondences) || payload.correspondences.length < 2) {
+        appendMessage(`Calibration failed: ${payload.error || 'insufficient marker correspondences'}`);
+        return;
+      }
+
+      appendMessage(`Calibration correspondences: ${JSON.stringify(payload.correspondences)}`);
+
+      const result = await submitLocalDaemonCommand({
+        type: 'set_calibration',
+        payload: {
+          correspondences: payload.correspondences,
+          sourceWidth: payload.sourceWidth,
+          sourceHeight: payload.sourceHeight,
+        },
+      });
+
+      appendMessage(result?.ok ? 'Calibration applied successfully.' : `Calibration rejected: ${result?.message || ''}`);
+    } catch (error) {
+      appendMessage(`Calibration apply failed: ${error.message}`);
+    } finally {
+      try {
+        await submitLocalDaemonCommand({ type: 'remove_calibration_markers', payload: {} });
+      } catch {
+        // Ignore cleanup errors.
+      }
+    }
   }
 
   function stopDaemonOnlineAnnouncements() {
@@ -315,9 +399,26 @@ async function loadRuntimeConfig() {
     }
 
     const mediaStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { displaySurface: 'browser' },
+      video: {
+        displaySurface: 'browser',
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
       audio: false,
     });
+
+    const capturedVideoTrack = mediaStream.getVideoTracks()[0];
+    const capturedSettings = capturedVideoTrack?.getSettings?.() || {};
+    appendMessage(`getDisplayMedia captured track settings: ${JSON.stringify(capturedSettings)}`);
+    if (capturedVideoTrack && 'contentHint' in capturedVideoTrack) {
+      // Chrome's WebRTC encoder can persistently downscale the captured resolution under
+      // its default CPU/bandwidth adaptation heuristics, which are tuned for motion video
+      // (prioritizing frame rate). This was observed to lock the published stream at a much
+      // lower resolution (e.g. ~800x392) regardless of the real page/window size. Setting
+      // contentHint to 'detail' tells the encoder to prioritize resolution/sharpness instead,
+      // which is the correct behavior for screen-sharing text/UI content.
+      capturedVideoTrack.contentHint = 'detail';
+    }
 
     screenStream = new Owt.Base.LocalStream(
       mediaStream,
@@ -339,6 +440,10 @@ async function loadRuntimeConfig() {
       state: {
         automated,
         controlTargetMode,
+        capturedResolution: {
+          width: capturedSettings.width,
+          height: capturedSettings.height,
+        },
       },
     });
   }
@@ -452,6 +557,8 @@ async function loadRuntimeConfig() {
         error: '',
         bridge: 'p2p',
       }).catch(() => {});
+
+      void runCalibration(incomingOrigin);
     } catch (resolveError) {
       await sendPeerMessage(
         incomingOrigin,
@@ -483,6 +590,11 @@ async function loadRuntimeConfig() {
 
     if (normalizedType === 'resolve') {
       await processResolveMessage(incomingOrigin, command);
+      return;
+    }
+
+    if (normalizedType === 'calibrate_result') {
+      await handleCalibrationResult(command);
       return;
     }
 
@@ -521,7 +633,18 @@ async function loadRuntimeConfig() {
     appendMessage(`signaling disconnected daemon=${daemonId} client=${clientId} host=${signalingServer}`);
   };
 
-  p2pClient.onMessage = async (event) => {
+  // Serializes processing of incoming peer commands in strict arrival order. The transport's
+  // 'messagereceived' dispatch does not wait for an async onMessage handler to finish before
+  // firing the next one, so back-to-back commands (e.g. mouse_down immediately followed by
+  // mouse_up/mouse_click) would otherwise run concurrently. Each command's processing involves
+  // a variable-latency Puppeteer/CDP round trip (resolveTargetCoordinates viewport lookup, cache
+  // hit vs miss), so without serialization a later command could finish before an earlier one,
+  // reordering the effective button-down/up sequence and causing Puppeteer's
+  // "'left' is already pressed."/"'left' is not pressed." errors. Chaining onto a single tail
+  // promise guarantees command N+1 only starts once command N has fully settled.
+  let inboundMessageQueue = Promise.resolve();
+
+  async function handleIncomingPeerMessage(event) {
       const incomingOrigin = String(event?.origin || event?.from || remoteInput?.value || '').trim();
       const incomingMessage = event?.message ?? event?.data;
 
@@ -555,7 +678,16 @@ async function loadRuntimeConfig() {
           // Ignore fallback send errors.
         }
       }
-    };
+  }
+
+  p2pClient.onMessage = (event) => {
+    inboundMessageQueue = inboundMessageQueue
+      .then(() => handleIncomingPeerMessage(event))
+      .catch((error) => {
+        appendMessage(`[queue] unhandled error processing peer message: ${error?.message || error}`);
+      });
+    return inboundMessageQueue;
+  };
 
   p2pClient.onSignalingConnected = async ({ host }) => {
     const daemonId = String(uidInput?.value || '').trim();

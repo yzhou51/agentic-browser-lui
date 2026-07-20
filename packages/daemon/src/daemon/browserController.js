@@ -105,9 +105,184 @@ function mapRemoteCoordinates(payload = {}, { targetWidth = 1, targetHeight = 1 
   });
 }
 
+// Fits a 1D linear model (domValue = scale * videoValue + offset) via ordinary least squares
+// across an arbitrary number of correspondence points. Used by setCalibration() so calibration
+// can use however many marker correspondences actually survived detection (>=2), instead of
+// only ever trusting a single fixed pair of points.
+function fitLinearAxis(points = [], videoKey, domKey) {
+  const n = points.length;
+  if (n < 2) {
+    return null;
+  }
+
+  let sumV = 0;
+  let sumD = 0;
+  let sumVV = 0;
+  let sumVD = 0;
+  for (const point of points) {
+    const v = Number(point[videoKey]);
+    const d = Number(point[domKey]);
+    sumV += v;
+    sumD += d;
+    sumVV += v * v;
+    sumVD += v * d;
+  }
+
+  const denominator = n * sumVV - sumV * sumV;
+  if (!Number.isFinite(denominator) || Math.abs(denominator) < 1e-6) {
+    // No spread on this axis (all points share ~the same video coordinate) -- can't fit a slope.
+    return null;
+  }
+
+  const scale = (n * sumVD - sumV * sumD) / denominator;
+  const offset = (sumD - scale * sumV) / n;
+  return { scale, offset };
+}
+
+// Robustly fits a 1D linear model (domValue = scale * videoValue + offset), rejecting outlier
+// correspondences before the final fit. A marker correspondence can be wildly wrong (hundreds of
+// pixels off) if its assigned color happens to collide with real page content elsewhere in the
+// frame (e.g. a page that uses a similar blue/white as one of our marker colors) -- an ordinary
+// least-squares fit is NOT robust to even one or two such outliers among a handful of points, so
+// this uses a RANSAC-style approach: every pair of points defines a candidate 2-point model,
+// score each candidate by how many of the OTHER points it also explains within a small pixel
+// tolerance ("inliers"), keep the best-scoring candidate's inlier set, then do a final ordinary
+// least-squares refit using only those inliers for a more accurate result than the raw 2-point
+// seed model.
+function robustFitAxis(points = [], videoKey, domKey, inlierThresholdPx = 15) {
+  const n = points.length;
+  if (n < 2) {
+    return null;
+  }
+
+  let bestInlierIndices = null;
+
+  for (let i = 0; i < n; i += 1) {
+    for (let j = i + 1; j < n; j += 1) {
+      const vi = Number(points[i][videoKey]);
+      const vj = Number(points[j][videoKey]);
+      const di = Number(points[i][domKey]);
+      const dj = Number(points[j][domKey]);
+      const videoDelta = vj - vi;
+
+      if (!Number.isFinite(videoDelta) || Math.abs(videoDelta) < 1) {
+        continue; // Degenerate pair for this axis (near-identical video coordinate).
+      }
+
+      const scale = (dj - di) / videoDelta;
+      const offset = di - scale * vi;
+      if (!Number.isFinite(scale) || !Number.isFinite(offset)) {
+        continue;
+      }
+
+      const inlierIndices = [];
+      points.forEach((point, index) => {
+        const predicted = scale * Number(point[videoKey]) + offset;
+        if (Math.abs(Number(point[domKey]) - predicted) <= inlierThresholdPx) {
+          inlierIndices.push(index);
+        }
+      });
+
+      if (!bestInlierIndices || inlierIndices.length > bestInlierIndices.length) {
+        bestInlierIndices = inlierIndices;
+      }
+    }
+  }
+
+  if (!bestInlierIndices || bestInlierIndices.length < 2) {
+    return null;
+  }
+
+  const inlierPoints = bestInlierIndices.map((index) => points[index]);
+  const refined = fitLinearAxis(inlierPoints, videoKey, domKey);
+  if (!refined) {
+    return null;
+  }
+
+  return {
+    ...refined,
+    inlierCount: inlierPoints.length,
+    outlierCount: n - inlierPoints.length,
+    inlierIds: inlierPoints.map((point) => point.id),
+  };
+}
+
+// Resolves the calibration to actually use for a given click's reported source resolution
+// (payload.sx/sy), accounting for the fact that WebRTC can change the encoded video resolution
+// mid-session (bandwidth/CPU-driven quality adaptation) after calibration was originally
+// computed for one specific resolution. Two cases are handled:
+//
+//  1. Exact match (within 5%): the resolution hasn't meaningfully changed -- use the stored
+//     scale/offset as-is.
+//  2. Uniform rescale: the new resolution is a UNIFORMLY scaled version of the calibrated one
+//     (same ratio on both width and height, e.g. the whole frame got scaled down 30% for
+//     bandwidth reasons). Because that kind of resize happens AFTER the fixed capture-to-page
+//     crop (it just changes pixel density, not which region of the page is visible), the
+//     calibrated offset is still valid unchanged, and only the scale needs dividing by the
+//     resize factor: domX = scaleX*videoX_atCalibRes + offsetX, and
+//     videoX_atCalibRes = videoX_now / resizeFactorX, so domX = (scaleX/resizeFactorX)*videoX_now
+//     + offsetX.
+//
+// If the new resolution changed non-uniformly (a genuinely different crop, not just a resize --
+// e.g. the aspect ratio itself shifted), this returns null so the caller falls back to plain
+// proportional mapping rather than applying a stale/wrong correction.
+function resolveCalibrationForSource(calibration, sx, sy) {
+  if (!calibration || !(sx > 0) || !(sy > 0) || !(calibration.sourceWidth > 0) || !(calibration.sourceHeight > 0)) {
+    return null;
+  }
+
+  const widthDelta = Math.abs(sx - calibration.sourceWidth) / calibration.sourceWidth;
+  const heightDelta = Math.abs(sy - calibration.sourceHeight) / calibration.sourceHeight;
+
+  if (widthDelta < 0.05 && heightDelta < 0.05) {
+    return {
+      scaleX: calibration.scaleX,
+      scaleY: calibration.scaleY,
+      offsetX: calibration.offsetX,
+      offsetY: calibration.offsetY,
+      rescaled: false,
+    };
+  }
+
+  const resizeFactorX = sx / calibration.sourceWidth;
+  const resizeFactorY = sy / calibration.sourceHeight;
+  if (!Number.isFinite(resizeFactorX) || !Number.isFinite(resizeFactorY) || resizeFactorX <= 0 || resizeFactorY <= 0) {
+    return null;
+  }
+
+  // Require the two axes to have scaled by (nearly) the same factor -- that's what
+  // distinguishes "WebRTC uniformly resized the same captured region" from "a genuinely
+  // different crop/aspect ratio is now in play" (which we can't safely correct for without a
+  // fresh calibration).
+  const factorRatio = resizeFactorX / resizeFactorY;
+  if (factorRatio < 0.97 || factorRatio > 1.03) {
+    return null;
+  }
+
+  const scaleX = calibration.scaleX / resizeFactorX;
+  const scaleY = calibration.scaleY / resizeFactorY;
+  if (![scaleX, scaleY].every(Number.isFinite)) {
+    return null;
+  }
+
+  return {
+    scaleX,
+    scaleY,
+    offsetX: calibration.offsetX,
+    offsetY: calibration.offsetY,
+    rescaled: true,
+    resizeFactorX,
+    resizeFactorY,
+  };
+}
+
 export class BrowserController {
   constructor({ headless = false, maxPageWidth = 3840, maxPageHeight = 2160 } = {}) {
     this.headless = headless;
+    // Explicit human-readable mode, derived from `headless`. Kept as the single source
+    // of truth for gating headless-only behavior (e.g. dynamic click calibration) so
+    // the proven headful mapping path is never touched.
+    this.mode = headless ? 'headless' : 'headful';
     this.maxPageWidth = Math.max(640, maxPageWidth);
     this.maxPageHeight = Math.max(480, maxPageHeight);
     this.browser = null;
@@ -116,6 +291,16 @@ export class BrowserController {
     this.userDataDir = resolveDefaultUserDataDir();
     this.cacheDir = resolveDefaultCacheDir();
     this.remoteDebuggingPort = normalizeRemoteDebuggingPort(process.env.DAEMON_CHROME_REMOTE_DEBUGGING_PORT);
+    // In headless mode, getDisplayMedia's tab/desktop capture surface size is fixed at
+    // Chrome PROCESS LAUNCH time (defaults to Chrome's classic 800x600 if --window-size is
+    // not passed) and CANNOT be changed afterward -- neither Emulation.setDeviceMetricsOverride
+    // (per-page) nor Browser.setWindowBounds (post-launch) actually resize this off-screen
+    // capture surface once the process has started. This only takes effect when this daemon
+    // LAUNCHES its own Chrome; it has no effect when attaching to an already-running Chrome
+    // via --remote-debugging-port (that external process must be started with its own
+    // --window-size to get a correctly-sized capture).
+    const launchWindowWidth = Math.max(1, Math.min(this.maxPageWidth, SIMULATED_DISPLAY_WIDTH));
+    const launchWindowHeight = Math.max(1, Math.min(this.maxPageHeight, SIMULATED_DISPLAY_HEIGHT));
     this.baseLaunchArgs = [
       '--disable-web-security',
       '--disable-blink-features=AutomationControlled',
@@ -126,6 +311,7 @@ export class BrowserController {
       '--no-first-run',
       '--no-default-browser-check',
       '--start-maximized',
+      `--window-size=${launchWindowWidth},${launchWindowHeight}`,
     ];
     this.defaultLaunchArgs = this.buildDefaultLaunchArgs(this.remoteDebuggingPort);
     this.launchConfig = {
@@ -136,6 +322,9 @@ export class BrowserController {
     this.browserConnectionMode = 'none';
     this.remoteAttachAttempted = false;
     this.remoteAttachConnected = false;
+    // Dynamic capture-to-content calibration (headless mode only). null until a
+    // successful calibration handshake with the client has been applied.
+    this.activeCalibration = null;
     // Cache for source dimensions with validation
     this.lastSourceDimensions = { width: 0, height: 0, timestamp: 0, sequence: 0 };
     // Cache for target page viewport (avoids CDP round-trip per mouse_move)
@@ -665,7 +854,69 @@ export class BrowserController {
       targetWidth: viewport.width,
       targetHeight: viewport.height,
     };
-    const mapped = mapRemoteCoordinates(effectivePayload, viewportContext);
+
+    // Dynamic capture-to-content calibration (headless mode only). The naive proportional
+    // mapping in mapRemoteCoordinates() assumes the captured video's pixels map 1:1
+    // (proportionally) onto the page's rendered content, which holds true in headful mode
+    // but can drift in headless mode due to differences in Chromium's off-screen capture
+    // pipeline. When a calibration has been computed (see setCalibration()), we try to reuse
+    // it even if WebRTC has since changed the encoded resolution (e.g. bandwidth/CPU-driven
+    // downscaling) -- see resolveCalibrationForSource() below. Any mismatch/absence safely
+    // falls back to the existing proportional mapping used by headful mode.
+    const calibration = this.activeCalibration;
+    const currentSx = Number(effectivePayload.sx || 0);
+    const currentSy = Number(effectivePayload.sy || 0);
+    const resolvedCalibration = resolveCalibrationForSource(calibration, currentSx, currentSy);
+    const useCalibration = this.headless && Boolean(resolvedCalibration);
+
+    if (this.headless && calibration && !resolvedCalibration) {
+      // Calibration exists but was skipped for this event; this would otherwise silently
+      // fall back to the pre-calibration proportional mapping (same "y too small" bias).
+      logger.warn('Calibration present but skipped for this coordinate (source size mismatch, not even a uniform rescale).', {
+        payloadSx: currentSx,
+        payloadSy: currentSy,
+        calibrationSourceWidth: calibration.sourceWidth,
+        calibrationSourceHeight: calibration.sourceHeight,
+      });
+    } else if (this.headless && resolvedCalibration && resolvedCalibration.rescaled) {
+      // WebRTC changed the encoded resolution (bandwidth/CPU adaptation) since calibration was
+      // computed, but the change was a uniform resize (same factor on both axes) of the
+      // calibrated capture, so the original calibration's offset still applies and only the
+      // scale needed adjusting. This keeps calibration valid across live resolution changes
+      // instead of only working for the exact resolution captured at calibration time.
+      logger.debug('Calibration adjusted for a uniformly rescaled source resolution.', {
+        payloadSx: currentSx,
+        payloadSy: currentSy,
+        calibrationSourceWidth: calibration.sourceWidth,
+        calibrationSourceHeight: calibration.sourceHeight,
+        resizeFactorX: resolvedCalibration.resizeFactorX,
+        resizeFactorY: resolvedCalibration.resizeFactorY,
+      });
+    }
+
+    let mapped;
+    if (useCalibration) {
+      const rawX = Number(effectivePayload.x || 0);
+      const rawY = Number(effectivePayload.y || 0);
+      mapped = {
+        x: Math.max(0, Math.min(viewportContext.targetWidth - 1, Math.round(rawX * resolvedCalibration.scaleX + resolvedCalibration.offsetX))),
+        y: Math.max(0, Math.min(viewportContext.targetHeight - 1, Math.round(rawY * resolvedCalibration.scaleY + resolvedCalibration.offsetY))),
+      };
+    } else {
+      mapped = mapRemoteCoordinates(effectivePayload, viewportContext);
+    }
+
+    logger.debug('resolveTargetCoordinates mapping decision', {
+      headless: this.headless,
+      calibrationActive: Boolean(calibration),
+      usedCalibration: useCalibration,
+      calibrationRescaled: Boolean(resolvedCalibration?.rescaled),
+      raw: { x: Number(effectivePayload.x || 0), y: Number(effectivePayload.y || 0) },
+      sourceDims: { sx: Number(effectivePayload.sx || 0), sy: Number(effectivePayload.sy || 0) },
+      targetDims: viewportContext,
+      mapped,
+    });
+
     const hasViewportMapping =
       Number.isFinite(Number(effectivePayload.viewWidth)) && Number(effectivePayload.viewWidth) > 0 &&
       Number.isFinite(Number(effectivePayload.viewHeight)) && Number(effectivePayload.viewHeight) > 0;
@@ -701,6 +952,223 @@ export class BrowserController {
     return mapped;
   }
 
+  async injectCalibrationMarkers() {
+    if (!this.hasTargetPage()) {
+      throw new Error('No Puppeteer target page is open to calibrate.');
+    }
+
+    const page = this.targetPage;
+    const currentViewport = page.viewport() || {};
+    const targetWidth = Math.max(1, Number(currentViewport.width || 0));
+    const targetHeight = Math.max(1, Number(currentViewport.height || 0));
+    const markerSize = 40;
+
+    // A single fixed pair of corner markers turned out to be fragile: the captured/transmitted
+    // video frame has been observed to be CROPPED (not just scaled) relative to the real page,
+    // by an amount that varies between runs/pages -- sometimes clipping the bottom-right corner,
+    // other times clipping enough of the top-left that even an 8%-inset marker misses. There is
+    // no single "safe" pair of positions that reliably survives every crop.
+    //
+    // Instead, inject a 3x3 GRID of uniquely-colored markers spread across the page (10/50/90%
+    // of width/height). Detection only needs >=2 of these to succeed (see setCalibration's
+    // least-squares fit, which uses however many correspondences are actually found), so as long
+    // as ANY two grid points survive whatever cropping occurs, calibration can still complete --
+    // regardless of which edge(s) get clipped.
+    const gridFractions = [0.1, 0.5, 0.9];
+    // Avoid colors that commonly collide with real page content: pure white/black (page
+    // backgrounds/text), and "sky blue" ~(0,128,255) which sits within tolerance of the
+    // extremely common Bootstrap/web link blue #007bff (0,123,255) -- both were observed in
+    // practice to produce false-positive matches against real page pixels, corrupting the
+    // computed marker centroid entirely (residual of hundreds of pixels). Even so, some page
+    // may still coincidentally use one of these colors, which is why setCalibration() also runs
+    // outlier rejection on top of this palette rather than trusting every correspondence blindly.
+    const palette = [
+      [255, 0, 255], // magenta
+      [0, 255, 255], // cyan
+      [255, 255, 0], // yellow
+      [255, 0, 0], // red
+      [0, 255, 0], // green
+      [255, 0, 128], // rose
+      [255, 128, 0], // orange
+      [128, 0, 255], // purple
+      [128, 255, 0], // lime
+    ];
+
+    const markers = [];
+    let colorIndex = 0;
+    for (const yFraction of gridFractions) {
+      for (const xFraction of gridFractions) {
+        markers.push({
+          id: `g${colorIndex}`,
+          color: palette[colorIndex % palette.length],
+          domX: Math.max(markerSize / 2, Math.round(targetWidth * xFraction)),
+          domY: Math.max(markerSize / 2, Math.round(targetHeight * yFraction)),
+        });
+        colorIndex += 1;
+      }
+    }
+
+    await page.evaluate((markersToInject, size) => {
+      const existing = document.getElementById('__agentic_calibration_layer__');
+      if (existing) {
+        existing.remove();
+      }
+
+      const layer = document.createElement('div');
+      layer.id = '__agentic_calibration_layer__';
+      layer.style.position = 'fixed';
+      layer.style.top = '0';
+      layer.style.left = '0';
+      layer.style.width = '100%';
+      layer.style.height = '100%';
+      layer.style.zIndex = '2147483647';
+      layer.style.pointerEvents = 'none';
+      // Force our own top-level stacking context so page content with its own
+      // transform/opacity/filter-based stacking contexts can't paint above these markers.
+      layer.style.isolation = 'isolate';
+
+      markersToInject.forEach((marker) => {
+        const dot = document.createElement('div');
+        dot.style.position = 'absolute';
+        dot.style.left = `${marker.domX - size / 2}px`;
+        dot.style.top = `${marker.domY - size / 2}px`;
+        dot.style.width = `${size}px`;
+        dot.style.height = `${size}px`;
+        dot.style.background = `rgb(${marker.color[0]}, ${marker.color[1]}, ${marker.color[2]})`;
+        layer.appendChild(dot);
+      });
+
+      document.documentElement.appendChild(layer);
+    }, markers, markerSize);
+
+    logger.debug('Injected calibration markers.', { markers, targetWidth, targetHeight });
+
+    return { markers, targetWidth, targetHeight };
+  }
+
+  async removeCalibrationMarkers() {
+    if (!this.hasTargetPage()) {
+      return;
+    }
+
+    try {
+      await this.targetPage.evaluate(() => {
+        const existing = document.getElementById('__agentic_calibration_layer__');
+        if (existing) {
+          existing.remove();
+        }
+      });
+    } catch (error) {
+      logger.warn(`Failed to remove calibration markers: ${error.message}`);
+    }
+  }
+
+  setCalibration(correspondences = [], { sourceWidth = 0, sourceHeight = 0 } = {}) {
+    if (!Array.isArray(correspondences) || correspondences.length < 2) {
+      logger.warn('Rejected calibration: fewer than 2 marker correspondences.', {
+        count: Array.isArray(correspondences) ? correspondences.length : 0,
+      });
+      return false;
+    }
+
+    const validPoints = correspondences.filter((point) =>
+      Number.isFinite(Number(point?.domX)) &&
+      Number.isFinite(Number(point?.domY)) &&
+      Number.isFinite(Number(point?.videoX)) &&
+      Number.isFinite(Number(point?.videoY))
+    );
+
+    if (validPoints.length < 2) {
+      logger.warn('Rejected calibration: fewer than 2 valid (finite) marker correspondences.', {
+        count: validPoints.length,
+      });
+      return false;
+    }
+
+    // Robust fit across all detected correspondences (not just the first 2, and not blindly
+    // trusting every one either). With the 3x3 marker grid, however many points survive whatever
+    // cropping/occlusion occurred on this particular page/run are candidates, but a marker's
+    // color can coincidentally collide with real page content (e.g. common web link blues,
+    // white backgrounds) producing a wildly wrong centroid for that one point. robustFitAxis()
+    // uses a RANSAC-style pairwise search to find and discard such outliers per axis before the
+    // final least-squares fit, so a minority of corrupted correspondences can't skew the result.
+    const fitX = robustFitAxis(validPoints, 'videoX', 'domX');
+    const fitY = robustFitAxis(validPoints, 'videoY', 'domY');
+
+    if (!fitX || !fitY) {
+      logger.warn('Rejected calibration: marker points are degenerate (no spread on one axis, or too few inliers).', {
+        count: validPoints.length,
+      });
+      return false;
+    }
+
+    const { scale: scaleX, offset: offsetX } = fitX;
+    const { scale: scaleY, offset: offsetY } = fitY;
+
+    if (![scaleX, scaleY, offsetX, offsetY].every(Number.isFinite)) {
+      logger.warn('Rejected calibration: computed scale/offset is not finite.', { scaleX, scaleY, offsetX, offsetY });
+      return false;
+    }
+
+    if (fitX.outlierCount > 0 || fitY.outlierCount > 0) {
+      logger.warn('Calibration discarded outlier marker correspondence(s) before fitting.', {
+        totalPoints: validPoints.length,
+        xInliers: fitX.inlierIds,
+        xOutlierCount: fitX.outlierCount,
+        yInliers: fitY.inlierIds,
+        yOutlierCount: fitY.outlierCount,
+      });
+    }
+
+    this.activeCalibration = {
+      scaleX,
+      scaleY,
+      offsetX,
+      offsetY,
+      sourceWidth: Math.max(1, Number(sourceWidth) || 0),
+      sourceHeight: Math.max(1, Number(sourceHeight) || 0),
+      computedAt: Date.now(),
+      pointCount: validPoints.length,
+      xInlierCount: fitX.inlierCount,
+      yInlierCount: fitY.inlierCount,
+    };
+
+    logger.info('Applied dynamic capture-to-content calibration.', this.activeCalibration);
+    return true;
+  }
+
+  clearCalibration() {
+    this.activeCalibration = null;
+  }
+
+  async resizeBrowserWindow(width, height) {
+    if (!this.hasTargetPage()) {
+      return false;
+    }
+
+    try {
+      const session = await this.targetPage.createCDPSession();
+      const { windowId } = await session.send('Browser.getWindowForTarget');
+      await session.send('Browser.setWindowBounds', {
+        windowId,
+        bounds: { width: Math.round(width), height: Math.round(height) },
+      });
+      await session.detach();
+      logger.info('Resized actual browser window (real capture surface, not just the page viewport emulation).', {
+        width: Math.round(width),
+        height: Math.round(height),
+      });
+      return true;
+    } catch (error) {
+      // This can fail for attached/remote-debugging sessions in some environments
+      // (e.g. sandboxed containers without a real window manager). Emulation.setDeviceMetricsOverride
+      // still applies to page rendering even if this fails; only the capture-surface size stays
+      // whatever the real window already was.
+      logger.warn(`Failed to resize actual browser window via CDP Browser.setWindowBounds: ${error.message}`);
+      return false;
+    }
+  }
+
   async optimizeViewportForPageSize(page) {
     try {
       // window.screen.availWidth/availHeight cannot be trusted here: it reflects Chromium's
@@ -713,8 +1181,19 @@ export class BrowserController {
       // high-level page.setViewport() does not set on its own. This also fixes the separate
       // issue where a reused/attached page (picked up via hydrateKnownPages()) never gets
       // ensureTargetPage()'s baseline viewport, since we apply it here unconditionally.
+      //
+      // IMPORTANT: Emulation.setDeviceMetricsOverride only changes what the PAGE thinks its
+      // own viewport is. It does NOT resize the actual OS-level browser window/screen. When
+      // attached to an already-running Chrome (remote-debugging-port), getDisplayMedia's
+      // tab/desktop capture reflects the REAL window size, independent of this page-level
+      // override -- this was observed to cause a large capture-vs-page mismatch (e.g. video
+      // captured at 800x390 while the page viewport was emulated at 1905x1080, different
+      // aspect ratios entirely). So we also explicitly resize the real browser window via
+      // Browser.setWindowBounds to keep the actual capture surface in sync.
       const baselineWidth = Math.max(1, Math.min(this.maxPageWidth, SIMULATED_DISPLAY_WIDTH));
       const baselineHeight = Math.max(1, Math.min(this.maxPageHeight, SIMULATED_DISPLAY_HEIGHT));
+
+      await this.resizeBrowserWindow(baselineWidth, baselineHeight);
 
       try {
         const cdpSession = await page.createCDPSession();
@@ -758,6 +1237,7 @@ export class BrowserController {
 
       // Set viewport to optimal size
       await page.setViewport({ width: optimalWidth, height: optimalHeight });
+      await this.resizeBrowserWindow(optimalWidth, optimalHeight);
       
       // Wait for layout/reflow after viewport change
       await page.waitForFunction(() => document.readyState === 'complete', { timeout: 2000 }).catch(() => {

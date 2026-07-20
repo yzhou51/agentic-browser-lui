@@ -504,7 +504,14 @@ async function loadRuntimeConfig() {
     appendMessage('signaling server disconnected');
   };
 
-  p2pClient.onMessage = async (e) => {
+  // Serializes processing of incoming peer commands in strict arrival order. See the matching
+  // comment in daemon-cli.js for the full rationale: without this, concurrently-processed
+  // commands with variable-latency Puppeteer/CDP round trips can complete out of arrival order,
+  // causing Puppeteer's "'left' is already pressed."/"'left' is not pressed." errors on rapid
+  // mouse_down/mouse_up/mouse_click sequences.
+  let inboundMessageQueue = Promise.resolve();
+
+  async function handleIncomingPeerMessage(e) {
       const incomingOrigin = String(e?.origin || e?.from || remoteInput.value || '').trim();
       const incomingMessage = e?.message ?? e?.data;
 
@@ -594,7 +601,16 @@ async function loadRuntimeConfig() {
           // Ignore secondary send failures.
         }
       }
-    };
+  }
+
+  p2pClient.onMessage = (e) => {
+    inboundMessageQueue = inboundMessageQueue
+      .then(() => handleIncomingPeerMessage(e))
+      .catch((error) => {
+        appendMessage(`[queue] unhandled error processing peer message: ${error?.message || error}`);
+      });
+    return inboundMessageQueue;
+  };
 
   p2pClient.onSignalingConnected = ({ host }) => {
     const daemonId = uidInput.value.trim();
@@ -772,7 +788,11 @@ async function loadRuntimeConfig() {
           controlTargetMode,
         });
         mediaStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { displaySurface: 'browser' },
+          video: {
+            displaySurface: 'browser',
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
           audio: false,
         });
       }
@@ -799,6 +819,17 @@ async function loadRuntimeConfig() {
       setStatus(
         `Share warning: selected stream looks like "${sharedTrackLabel}" but controlled tab is ${expectedTarget}`
       );
+    }
+
+    const capturedVideoTrack = mediaStream.getVideoTracks()[0];
+    if (capturedVideoTrack && 'contentHint' in capturedVideoTrack) {
+      // Chrome's WebRTC encoder can persistently downscale the captured resolution under
+      // its default CPU/bandwidth adaptation heuristics, which are tuned for motion video
+      // (prioritizing frame rate). This was observed to lock the published stream at a much
+      // lower resolution (e.g. ~800x392) regardless of the real page/window size. Setting
+      // contentHint to 'detail' tells the encoder to prioritize resolution/sharpness instead,
+      // which is the correct behavior for screen-sharing text/UI content.
+      capturedVideoTrack.contentHint = 'detail';
     }
 
     screenStream = new Owt.Base.LocalStream(

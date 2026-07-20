@@ -96,6 +96,28 @@ export class CommandProcessor {
             ...snapshot,
           };
         }
+        case 'inject_calibration_markers': {
+          const result = await this.browser.injectCalibrationMarkers();
+          return { ok: true, bridge: 'puppeteer', ...result };
+        }
+        case 'remove_calibration_markers': {
+          await this.browser.removeCalibrationMarkers();
+          return { ok: true, bridge: 'puppeteer' };
+        }
+        case 'set_calibration': {
+          const applied = this.browser.setCalibration(payload.correspondences || [], {
+            sourceWidth: payload.sourceWidth,
+            sourceHeight: payload.sourceHeight,
+          });
+          return {
+            ok: applied,
+            message: applied ? 'Calibration applied.' : 'Calibration rejected (insufficient/degenerate points).',
+          };
+        }
+        case 'clear_calibration': {
+          this.browser.clearCalibration();
+          return { ok: true };
+        }
         case 'dispatch_target_command':
           return await this.browser.dispatchTargetCommand(payload.command || {});
         case 'mouse_move': {

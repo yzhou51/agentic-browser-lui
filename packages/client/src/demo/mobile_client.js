@@ -50,7 +50,12 @@ async function init() {
   let pendingMoveEvent = null;
   let pendingMoveExtra = null;
   let moveFlushTimer = null;
-  let moveSendInFlight = false;
+  // Chained promise (not a boolean flag) so that flushPendingDragMove() callers -- notably
+  // pointerup, which must ensure the LAST drag-move is actually sent before mouse_up -- can
+  // reliably AWAIT any currently in-flight send instead of racing past it. A boolean flag would
+  // let a caller observe "busy" and simply give up, leaving its own pending move to be flushed
+  // later by the in-flight send's own cleanup -- which could land AFTER mouse_up was sent.
+  let moveSendChain = Promise.resolve();
   const clientState = {
     owtConnecting: 'Connecting to OWT',
     owtConnected: 'Connected to OWT',
@@ -295,29 +300,149 @@ async function init() {
     console.log(message);
   }
 
-  async function flushPendingDragMove() {
-    if (!pendingMoveEvent || moveSendInFlight) {
-      return;
+  // Debug aid for diagnosing the capture-to-content crop: saves the EXACT frame used for
+  // calibration marker detection as a downloaded PNG, so it can be visually inspected (e.g. to
+  // check whether Chrome's own title bar/tab strip/address bar are baked into the captured
+  // content, which would confirm the "window chrome included in capture" cropping hypothesis).
+  function saveDebugCalibrationFrame(canvas) {
+    try {
+      const link = document.createElement('a');
+      link.href = canvas.toDataURL('image/png');
+      link.download = `calibration-frame-${Date.now()}.png`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      log(`[DEBUG] Saved calibration frame snapshot (${canvas.width}x${canvas.height}) as ${link.download}`);
+    } catch (error) {
+      log(`[DEBUG] Failed to save calibration frame snapshot: ${error.message}`);
+    }
+  }
+
+  async function detectCalibrationMarkers(markers, { saveDebugFrame = false } = {}) {
+    const video = el.remoteVideo;
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      return { ok: false, error: 'remote video is not ready for calibration.' };
+    }
+    if (!Array.isArray(markers) || !markers.length) {
+      return { ok: false, error: 'no calibration markers provided.' };
     }
 
-    const eventToSend = pendingMoveEvent;
-    const extraToSend = pendingMoveExtra || { isDragging: true };
-    pendingMoveEvent = null;
-    pendingMoveExtra = null;
-    moveSendInFlight = true;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) {
+      return { ok: false, error: 'canvas 2d context unavailable.' };
+    }
 
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    if (saveDebugFrame) {
+      saveDebugCalibrationFrame(canvas);
+    }
+
+    let imageData;
     try {
-      log(`[DRAG] Flushing: (${eventToSend.clientX}, ${eventToSend.clientY}), extra=${JSON.stringify(extraToSend)}`);
-      await sendMappedMouseCommand('mouse_move', eventToSend, extraToSend);
-    } catch (err) {
-      log(`[DRAG] Error flushing: ${err.message}`);
-      // Keep drag move lightweight.
-    } finally {
-      moveSendInFlight = false;
-      if (pendingMoveEvent) {
-        log(`[DRAG] Another event queued, scheduling flush`);
-        scheduleDragMoveFlush();
+      imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    } catch (error) {
+      return { ok: false, error: `getImageData failed: ${error.message}` };
+    }
+
+    const { data, width, height } = imageData;
+    const tolerance = 40;
+    const correspondences = [];
+    const missing = [];
+
+    for (const marker of markers) {
+      const target = Array.isArray(marker.color) ? marker.color : [255, 0, 255];
+      let sumX = 0;
+      let sumY = 0;
+      let count = 0;
+
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          const idx = (y * width + x) * 4;
+          const r = data[idx];
+          const g = data[idx + 1];
+          const b = data[idx + 2];
+          if (
+            Math.abs(r - target[0]) <= tolerance &&
+            Math.abs(g - target[1]) <= tolerance &&
+            Math.abs(b - target[2]) <= tolerance
+          ) {
+            sumX += x;
+            sumY += y;
+            count += 1;
+          }
+        }
       }
+
+      // Don't fail immediately just because one marker in the grid wasn't found -- with a 3x3
+      // grid spread across the page, it's expected that some markers may fall outside whatever
+      // region actually survives capture/crop/occlusion on a given page. As long as at least 2
+      // markers ARE found (checked after this loop), that's enough for a linear calibration fit.
+      if (count < 10) {
+        missing.push(marker.id || 'unknown');
+        continue;
+      }
+
+      correspondences.push({
+        id: marker.id,
+        domX: Number(marker.domX || 0),
+        domY: Number(marker.domY || 0),
+        videoX: sumX / count,
+        videoY: sumY / count,
+      });
+    }
+
+    if (correspondences.length < 2) {
+      return {
+        ok: false,
+        error: `only ${correspondences.length}/${markers.length} calibration marker(s) detected (missing: ${missing.join(', ') || 'none'}).`,
+      };
+    }
+
+    return {
+      ok: true,
+      sourceWidth: canvas.width,
+      sourceHeight: canvas.height,
+      correspondences,
+    };
+  }
+
+  async function flushPendingDragMove() {
+    // Chain onto any currently in-flight/pending send instead of a boolean "busy" check, so a
+    // caller that awaits this (like pointerup, which must guarantee the final drag-move is sent
+    // BEFORE mouse_up) reliably waits for everything already queued/sending to actually finish,
+    // rather than observing "busy" and returning immediately while a send is still in flight.
+    moveSendChain = moveSendChain.then(async () => {
+      if (!pendingMoveEvent) {
+        return;
+      }
+
+      const eventToSend = pendingMoveEvent;
+      const extraToSend = pendingMoveExtra || { isDragging: true };
+      pendingMoveEvent = null;
+      pendingMoveExtra = null;
+
+      try {
+        log(`[DRAG] Flushing: (${eventToSend.clientX}, ${eventToSend.clientY}), extra=${JSON.stringify(extraToSend)}`);
+        await sendMappedMouseCommand('mouse_move', eventToSend, extraToSend);
+      } catch (err) {
+        log(`[DRAG] Error flushing: ${err.message}`);
+        // Keep drag move lightweight.
+      }
+    }).catch((err) => {
+      log(`[DRAG] Unexpected error in move send chain: ${err.message}`);
+    });
+
+    await moveSendChain;
+
+    // A new move may have been queued by the time our link ran (e.g. a pointermove fired while
+    // we were awaiting the chain). Schedule another throttled flush for it rather than losing it.
+    if (pendingMoveEvent && !moveFlushTimer) {
+      log(`[DRAG] Another event queued, scheduling flush`);
+      scheduleDragMoveFlush();
     }
   }
 
@@ -787,7 +912,13 @@ async function init() {
   }
 
   function isControlReady() {
-    return Boolean(connected && el.remoteVideo?.srcObject);
+    // Require actual video metadata (videoWidth/videoHeight), not just srcObject being
+    // attached. srcObject is set immediately in onRemoteStream, well before the video has
+    // decoded any real frame -- clicking before then makes getRenderedVideoContentRect()
+    // fall back to the video element's own CSS-rendered box size instead of the real
+    // stream resolution, producing a click mapping completely unrelated to the actual
+    // captured video (and unrelated to anything changed on the daemon side).
+    return Boolean(connected && el.remoteVideo?.srcObject && el.remoteVideo.videoWidth > 0 && el.remoteVideo.videoHeight > 0);
   }
 
   async function sendTextInput(text) {
@@ -1017,6 +1148,47 @@ async function init() {
         setClientState('daemonConnecting', `Sending Resolve to daemon "${daemonId || getDaemonId()}"...`);
         log(`daemon_online received from "${origin}". Triggering Resolve.`);
         void sendResolve('daemon-online');
+        return;
+      }
+      if (parsed.type === 'calibrate_request') {
+        const markers = Array.isArray(parsed?.payload?.markers) ? parsed.payload.markers : [];
+        log(`Calibration requested by daemon "${origin}" (${markers.length} markers).`);
+        void (async () => {
+          // Retry a few times with a short delay: the video element may not yet have
+          // decoded/rendered a frame that actually contains the just-injected markers
+          // (WebRTC first-frame latency can exceed a single detection attempt).
+          const maxAttempts = 4;
+          const retryDelayMs = 300;
+          let detection = { ok: false, error: 'not attempted' };
+          for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            // Only save a debug snapshot on the first attempt (and only when explicitly enabled
+            // via ?debugCalibrationFrame=1) to avoid spamming downloads during normal use.
+            const shouldSaveDebugFrame = attempt === 1 && hasAnySearchParam(searchParams, ['debugCalibrationFrame']);
+            detection = await detectCalibrationMarkers(markers, { saveDebugFrame: shouldSaveDebugFrame });
+            if (detection.ok) {
+              break;
+            }
+            log(`Calibration detection attempt ${attempt}/${maxAttempts} failed: ${detection.error}`);
+            if (attempt < maxAttempts) {
+              await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
+            }
+          }
+
+          if (!detection.ok) {
+            log(`Calibration detection failed after ${maxAttempts} attempts: ${detection.error}`);
+          } else {
+            log(`Calibration detection succeeded: ${JSON.stringify(detection.correspondences)}`);
+          }
+          try {
+            await client.sendMessage({
+              type: 'calibrate_result',
+              requestId: parsed.requestId,
+              payload: detection,
+            });
+          } catch (error) {
+            log(`Calibration result send failed: ${error.message}`);
+          }
+        })();
         return;
       }
       if (parsed.type === 'resolve_ack') {
