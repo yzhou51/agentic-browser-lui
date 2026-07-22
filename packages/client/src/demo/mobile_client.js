@@ -20,8 +20,13 @@ async function init() {
   let isMousePressed = false;
   let activePointerId = null;
   let activePointerStart = null;
-  let touchPressPending = false;
-  let suppressTouchClick = false;
+  // A press is "pending" from pointerdown until we can classify it as a click (release without
+  // movement -> a single mouse_click) or a drag (movement past threshold -> mouse_down + moves +
+  // mouse_up). This applies to BOTH touch and mouse: sending mouse_down eagerly on pointerdown and
+  // a mouse_click on the DOM click would make the daemon receive mouse_down -> mouse_up ->
+  // mouse_click, i.e. it clicks the element twice and the selection toggles back off.
+  let pressPending = false;
+  let suppressClick = false;
   let remoteDragMoved = false;
   let keyboardFabDrag = null;
   let keyboardFabSuppressClick = false;
@@ -571,6 +576,49 @@ async function init() {
       window.clearTimeout(moveFlushTimer);
       moveFlushTimer = null;
     }
+  }
+
+  // Serializes the discrete button commands (mouse_down / mouse_up / mouse_click) through the
+  // SAME chain as drag-moves, appending each one SYNCHRONOUSLY from its event handler.
+  //
+  // The browser dispatches pointerdown -> pointermove -> pointerup -> click in order, but each
+  // handler is async: pointerup used to `await flushPendingDragMove()` before sending mouse_up,
+  // and the browser fires the `click` event WITHOUT waiting for pointerup's promise to settle.
+  // That let the click handler put mouse_click on the wire while pointerup was still awaiting the
+  // flush, so mouse_click overtook mouse_up. The daemon processes commands in strict arrival
+  // order, so it saw mouse_down -> mouse_click -> mouse_up -- a corrupted button sequence that
+  // made element selection fail. Appending to the chain synchronously (the assignment below runs
+  // before the handler yields) preserves DOM dispatch order regardless of per-send latency.
+  function enqueueMouseCommand(type, event, extraPayload = {}) {
+    // Snapshot the fields the payload builder reads, so the deferred send is unaffected by any
+    // later mutation/reuse of the event or by the pointer having since moved.
+    const snapshot = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      button: event.button,
+      pointerType: event.pointerType,
+    };
+
+    moveSendChain = moveSendChain.then(async () => {
+      // Flush any coalesced pending drag-move first so a throttled move can never overtake the
+      // button command that logically follows it.
+      if (pendingMoveEvent) {
+        const eventToSend = pendingMoveEvent;
+        const extraToSend = pendingMoveExtra || { isDragging: true };
+        pendingMoveEvent = null;
+        pendingMoveExtra = null;
+        try {
+          await sendMappedMouseCommand('mouse_move', eventToSend, extraToSend);
+        } catch (err) {
+          log(`[mouse] pending move flush failed: ${err.message}`);
+        }
+      }
+      await sendMappedMouseCommand(type, snapshot, extraPayload);
+    }).catch((err) => {
+      log(`[mouse] ${type} send failed: ${err.message}`);
+    });
+
+    return moveSendChain;
   }
 
   function launchKeyboard() {
@@ -1413,13 +1461,13 @@ async function init() {
       showTouchScrollbars();
       swipeStart = { x: event.clientX, y: event.clientY, timestamp: Date.now() };
       swipeTarget = 'video';
-      touchPressPending = true;
-      isMousePressed = false;
       log(`Touch start on VIDEO (pointer ${event.pointerId}): (${Math.round(event.clientX)}, ${Math.round(event.clientY)})`);
-    } else {
-      isMousePressed = true;
     }
 
+    // Defer the button press for ALL pointer types until we know click vs drag. Do NOT send
+    // mouse_down here -- a plain click will send a single mouse_click on release instead.
+    pressPending = true;
+    isMousePressed = false;
     activePointerId = event.pointerId;
     activePointerStart = { x: event.clientX, y: event.clientY };
     remoteDragMoved = false;
@@ -1429,14 +1477,6 @@ async function init() {
       }
     } catch {
       // Ignore pointer capture failures.
-    }
-
-    if (event.pointerType !== 'touch') {
-      try {
-        await sendMappedMouseCommand('mouse_down', event);
-      } catch (error) {
-        log(`mouse_down failed: ${error.message}`);
-      }
     }
   });
 
@@ -1449,18 +1489,16 @@ async function init() {
       return;
     }
 
-    if (event.pointerType === 'touch' && touchPressPending && activePointerStart) {
+    if (pressPending && activePointerStart) {
       const dx = event.clientX - activePointerStart.x;
       const dy = event.clientY - activePointerStart.y;
       if (Math.hypot(dx, dy) >= 6) {
-        touchPressPending = false;
+        // Movement past threshold => this is a drag, not a click. Now (and only now) press the
+        // button down; the matching mouse_up is sent on release.
+        pressPending = false;
         isMousePressed = true;
         remoteDragMoved = true;
-        try {
-          await sendMappedMouseCommand('mouse_down', event);
-        } catch (error) {
-          log(`mouse_down(touch-drag) failed: ${error.message}`);
-        }
+        enqueueMouseCommand('mouse_down', event);
       } else {
         return;
       }
@@ -1505,37 +1543,35 @@ async function init() {
       return;
     }
 
-    if (wasTouch && touchPressPending) {
-      touchPressPending = false;
+    if (pressPending) {
+      // Released without dragging => a plain click. Send exactly ONE mouse_click and suppress the
+      // synthetic DOM 'click' that follows, so the daemon clicks the element once (not twice, and
+      // with no stray mouse_down/mouse_up around it).
+      pressPending = false;
       activePointerId = null;
       activePointerStart = null;
       isMousePressed = false;
-      suppressTouchClick = true;
+      suppressClick = true;
 
       if (currentSwipeTarget !== 'scrollbar') {
-        try {
-          await sendMappedMouseCommand('mouse_click', event);
-        } catch (error) {
-          log(`mouse_click(touch-tap) failed: ${error.message}`);
-        }
+        enqueueMouseCommand('mouse_click', event);
       }
       return;
     }
 
+    // A drag was in progress => release the button that pointermove pressed.
     activePointerId = null;
     activePointerStart = null;
     isMousePressed = false;
-    touchPressPending = false;
-    await flushPendingDragMove();
+    pressPending = false;
 
-    // Only send to daemon if touch was on video, not on scrollbar
+    // Only send to daemon if the gesture was on video, not on a scrollbar.
+    // enqueueMouseCommand flushes any pending drag-move as part of the same chain link, so we
+    // must NOT await a separate flush here.
     if (currentSwipeTarget !== 'scrollbar' || !wasTouch) {
-      try {
-        await sendMappedMouseCommand('mouse_up', event, { isDragging: false });
-      } catch (error) {
-        log(`mouse_up failed: ${error.message}`);
-      }
+      enqueueMouseCommand('mouse_up', event, { isDragging: false });
     } else {
+      clearPendingDragMove();
       log(`Skipped mouse_up: touch was on scrollbar, not video`);
     }
   });
@@ -1554,9 +1590,9 @@ async function init() {
     }
 
     if (!isMousePressed || (activePointerId !== null && event.pointerId !== activePointerId)) {
-      if (event.pointerType === 'touch') {
-        touchPressPending = false;
-      }
+      // Includes the deferred-press case (pressPending but never dragged): a cancelled click sends
+      // nothing to the daemon.
+      pressPending = false;
       clearPendingDragMove();
       return;
     }
@@ -1564,22 +1600,23 @@ async function init() {
     activePointerId = null;
     activePointerStart = null;
     isMousePressed = false;
-    touchPressPending = false;
-    await flushPendingDragMove();
+    pressPending = false;
 
-    // Only send to daemon if touch was on video
+    // Only send to daemon if touch was on video. (enqueueMouseCommand flushes any pending
+    // drag-move within the same chain link, so no separate await-flush is needed here.)
     if (currentSwipeTarget !== 'scrollbar' || event.pointerType !== 'touch') {
-      try {
-        await sendMappedMouseCommand('mouse_up', event, { isDragging: false });
-      } catch (error) {
-        log(`mouse_up(cancel) failed: ${error.message}`);
-      }
+      enqueueMouseCommand('mouse_up', event, { isDragging: false });
+    } else {
+      clearPendingDragMove();
     }
   });
 
   el.remoteVideo.addEventListener('click', async (event) => {
-    if (suppressTouchClick) {
-      suppressTouchClick = false;
+    // For both touch and mouse, pointerup already sent the single mouse_click for a plain click
+    // and set suppressClick. This synthetic DOM 'click' must therefore be dropped so the element
+    // isn't clicked twice. (Kept as a defensive fallback path in case pointerup didn't run.)
+    if (suppressClick) {
+      suppressClick = false;
       return;
     }
 
@@ -1597,19 +1634,17 @@ async function init() {
     }
 
     event.preventDefault();
-    try {
-      const videoRect = el.remoteVideo.getBoundingClientRect();
-      log(
-        `[DEBUG] click event - pointerType: ${event.pointerType} ` +
-        `raw coords: (${Math.round(event.clientX)}, ${Math.round(event.clientY)}) ` +
-        `video rect: (${Math.round(videoRect.left)}, ${Math.round(videoRect.top)}) ` +
-        `video size: ${Math.round(videoRect.width)}x${Math.round(videoRect.height)} ` +
-        `video source: ${el.remoteVideo.videoWidth}x${el.remoteVideo.videoHeight}`
-      );
-      await sendMappedMouseCommand('mouse_click', event);
-    } catch (error) {
-      log(`mouse_click failed: ${error.message}`);
-    }
+    const videoRect = el.remoteVideo.getBoundingClientRect();
+    log(
+      `[DEBUG] click event - pointerType: ${event.pointerType} ` +
+      `raw coords: (${Math.round(event.clientX)}, ${Math.round(event.clientY)}) ` +
+      `video rect: (${Math.round(videoRect.left)}, ${Math.round(videoRect.top)}) ` +
+      `video size: ${Math.round(videoRect.width)}x${Math.round(videoRect.height)} ` +
+      `video source: ${el.remoteVideo.videoWidth}x${el.remoteVideo.videoHeight}`
+    );
+    // Enqueued (not awaited) so it lands on the wire strictly after the preceding mouse_up that
+    // the pointerup handler enqueued synchronously a moment earlier.
+    enqueueMouseCommand('mouse_click', event);
   });
 
   el.remoteVideo.addEventListener('dblclick', (event) => {
