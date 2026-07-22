@@ -201,6 +201,8 @@ async function loadRuntimeConfig() {
       return;
     }
 
+    const timeoutMs = Number(runtimeConfig?.clientMessageTimeoutMs) || 0;
+
     try {
       await sendPeerMessageWithMetrics(
         clientId,
@@ -212,6 +214,7 @@ async function loadRuntimeConfig() {
             clientId,
             signalingServer,
             reason,
+            timeoutMs,
           },
         },
         { label: 'daemon_online' }

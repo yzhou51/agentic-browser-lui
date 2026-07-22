@@ -283,6 +283,8 @@ async function loadRuntimeConfig() {
       return;
     }
 
+    const timeoutMs = Number(runtimeConfig?.clientMessageTimeoutMs) || 0;
+
     await sendPeerMessage(
       clientId,
       {
@@ -293,6 +295,7 @@ async function loadRuntimeConfig() {
           clientId,
           signalingServer,
           reason,
+          timeoutMs,
         },
       },
       { label: 'daemon_online' }

@@ -889,6 +889,12 @@ if (process.argv.length > 2 && !toolModePayload) {
       headless: config.browserHeadless,
       runtimeMode: browser.getRuntimeMode(),
       browserConnectionMode: browser.browserConnectionMode,
+      // Prefer the active session's timeout: it is assigned early in
+      // startSessionWorkflow (before the daemon-agent page is opened and fetches
+      // this config), whereas currentClientMessageTimeoutMs is only armed later.
+      // Reading currentClientMessageTimeoutMs here would return the default
+      // (e.g. 120s) instead of the session's --timeout value (e.g. 300s).
+      clientMessageTimeoutMs: activeSession.timeoutMs || currentClientMessageTimeoutMs,
     }),
     submitCommand: (command) => commands.handle(command),
     getDaemonState: () => ({

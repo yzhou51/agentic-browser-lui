@@ -79,6 +79,7 @@ async function init() {
     vScrollThumb: document.getElementById('vScrollThumb'),
     keyboardFab: document.getElementById('keyboardFab'),
     keyboardCapture: document.getElementById('keyboardCapture'),
+    timeoutCountdown: document.getElementById('timeoutCountdown'),
   };
 
   function setCalibrationVeilVisible(visible) {
@@ -250,6 +251,91 @@ async function init() {
     el.terminalNotice.dataset.state = state;
     el.terminalNotice.textContent = text;
     el.terminalNotice.classList.add('is-visible');
+  }
+
+  // --- Session inactivity countdown ----------------------------------------
+  // The daemon enforces a client-message timeout: if it receives no peer
+  // message from this client within its configured window, it snapshots and
+  // terminates the session. The daemon resets that timer on every peer message
+  // it receives from us, so we mirror it here -- the countdown is reset on each
+  // operation we send -- to show the user how long they have left to act.
+  let sessionTimeoutMs = 0;
+  let countdownDeadline = 0;
+  let countdownTimer = null;
+
+  function formatCountdown(ms) {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  function renderCountdown() {
+    if (!el.timeoutCountdown) {
+      return;
+    }
+    if (!sessionTimeoutMs) {
+      el.timeoutCountdown.hidden = true;
+      return;
+    }
+    const remaining = Math.max(0, countdownDeadline - Date.now());
+    const totalSeconds = Math.ceil(remaining / 1000);
+    let state = 'ok';
+    if (totalSeconds <= 10) {
+      state = 'urgent';
+    } else if (totalSeconds <= 30) {
+      state = 'warn';
+    }
+    el.timeoutCountdown.hidden = false;
+    el.timeoutCountdown.dataset.state = state;
+    el.timeoutCountdown.textContent = `Time left: ${formatCountdown(remaining)}`;
+  }
+
+  function stopSessionCountdown() {
+    if (countdownTimer) {
+      window.clearInterval(countdownTimer);
+      countdownTimer = null;
+    }
+    sessionTimeoutMs = 0;
+    countdownDeadline = 0;
+    if (el.timeoutCountdown) {
+      el.timeoutCountdown.hidden = true;
+      el.timeoutCountdown.dataset.state = 'idle';
+      el.timeoutCountdown.textContent = '';
+    }
+  }
+
+  // Show a little less than the true daemon timeout so the countdown reaches
+  // zero slightly before the daemon actually fires -- giving the user a safety
+  // buffer rather than promising time that is already gone.
+  const COUNTDOWN_BUFFER_MS = 15000;
+
+  function startSessionCountdown(timeoutMs) {
+    const rawMs = Number(timeoutMs);
+    if (!Number.isFinite(rawMs) || rawMs <= 0) {
+      console.debug('[mobile_client] countdown not started: invalid timeoutMs', timeoutMs);
+      return;
+    }
+
+    // Never drop below a small positive window, even for very short timeouts.
+    const ms = Math.max(1000, rawMs - COUNTDOWN_BUFFER_MS);
+
+    sessionTimeoutMs = ms;
+    countdownDeadline = Date.now() + ms;
+    if (!countdownTimer) {
+      countdownTimer = window.setInterval(renderCountdown, 500);
+    }
+    renderCountdown();
+  }
+
+  // Reset the visible countdown, mirroring the daemon resetting its
+  // client-message timeout whenever it receives a peer message from us.
+  function noteUserActivity() {
+    if (!sessionTimeoutMs) {
+      return;
+    }
+    countdownDeadline = Date.now() + sessionTimeoutMs;
+    renderCountdown();
   }
 
   function clearResolveRetryTimer() {
@@ -935,6 +1021,7 @@ async function init() {
       return;
     }
 
+    noteUserActivity();
     const requestId = await client.sendCommand('text_input', { text });
     log(`text_input sent (${requestId}): ${JSON.stringify(text)}`);
   }
@@ -945,6 +1032,7 @@ async function init() {
       return;
     }
 
+    noteUserActivity();
     const requestId = await client.sendCommand('key_press', { key });
     log(`key_press sent (${requestId}): ${key}`);
   }
@@ -955,6 +1043,7 @@ async function init() {
         log(`Skip ${type}: remote stream is not ready.`);
         return `skipped-${type}-${Date.now()}`;
       }
+      noteUserActivity();
       return client.sendCommand(type, payload);
     },
     videoElement: el.remoteVideo,
@@ -1128,6 +1217,7 @@ async function init() {
     resolveInFlight = false;
     clearResolveRetryTimer();
     clearPendingDragMove();
+    stopSessionCountdown();
     setClientState('owtDisconnected', 'Disconnected from signaling.');
     log('Disconnected from signaling server.');
   };
@@ -1147,6 +1237,7 @@ async function init() {
           client.setDaemonId(daemonId);
         }
         daemonReadyHint = true;
+        startSessionCountdown(parsed?.payload?.timeoutMs);
         setClientState('daemonConnected', `Daemon "${daemonId || getDaemonId()}" is online.`);
         if (resolveInFlight) {
           log(`daemon_online received from "${origin}" while a Resolve attempt is already in flight; skipping.`);
@@ -1234,6 +1325,7 @@ async function init() {
         setClientState('daemonDisconnected', noticeMessage);
         log(`${parsed.type} received: ${noticeMessage}`);
 
+        stopSessionCountdown();
         void client.disconnect().catch(() => {});
         connected = false;
         leaveSent = false;
