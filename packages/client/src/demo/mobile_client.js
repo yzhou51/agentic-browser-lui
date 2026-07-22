@@ -2006,6 +2006,8 @@ async function init() {
 
   if (el.finishBtn) {
     el.finishBtn.addEventListener('click', async () => {
+      // Stop the "Time left" countdown as soon as the user finishes the session.
+      stopSessionCountdown();
       try {
         await sendFinishMessage('button_click');
         setClientState('daemonInteraction', `Finish sent to daemon "${getDaemonId()}".`);

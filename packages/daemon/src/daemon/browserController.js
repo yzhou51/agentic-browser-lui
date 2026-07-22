@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger } from '../logger.js';
+import { log } from 'node:console';
 
 const logger = createLogger('browser-controller');
 const __filename = fileURLToPath(import.meta.url);
@@ -1636,6 +1637,50 @@ export class BrowserController {
     if (!this.page) return;
     await this.page.close();
     this.page = null;
+  }
+
+  // Close ONLY the daemon-cli.html control page. Used during session termination
+  // cleanup (client finish/leave or timeout) so the control tab is dismissed while
+  // the target page and the browser itself are left untouched.
+  async closeDaemonCliPage() {
+    if (!this.browser) {
+      return;
+    }
+
+    let pages = [];
+    try {
+      pages = await this.browser.pages();
+    } catch (error) {
+      logger.warn(`closeDaemonCliPage: failed to list pages: ${error.message}`);
+      return;
+    }
+
+    for (const entry of pages) {
+      let url = '';
+      try {
+        url = String(entry.url() || '');
+        logger.debug(`closeDaemonCliPage: checking page URL: ${url}`);
+      } catch {
+        continue;
+      }
+      if (!/\/daemon-cli\.html(?:[?#]|$)/i.test(url)) {
+        continue;
+      }
+      if (typeof entry.isClosed === 'function' && entry.isClosed()) {
+        if (entry === this.page) {
+          this.page = null;
+        }
+        continue;
+      }
+      try {
+        await entry.close();
+      } catch (error) {
+        logger.warn(`closeDaemonCliPage: failed to close page: ${error.message}`);
+      }
+      if (entry === this.page) {
+        this.page = null;
+      }
+    }
   }
 
   async closeTargetPage() {

@@ -358,6 +358,20 @@ async function handleTerminationMessage(options = {}) {
     });
   }
 
+  // Close only the daemon-cli.html control page as part of termination cleanup
+  // (client finish/leave or timeout). This must run BEFORE completeSession(),
+  // because completeSession() notifies the completion waiters that drive the
+  // runtime's browser shutdown -- once that teardown starts it races (and closes)
+  // the CDP connection, making page.close() fail. The target page and the browser
+  // itself are intentionally left untouched here.
+  try {
+    await browser.closeDaemonCliPage();
+  } catch (error) {
+    logger.warn(`Failed to close daemon-cli page on ${outcome}.`, {
+      error: error.message,
+    });
+  }
+
   // Complete session
   completeSession(outcome, statusMessage);
 

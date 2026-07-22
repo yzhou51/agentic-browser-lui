@@ -147,9 +147,8 @@ server.on('error', (error) => {
 });
 
 server.listen(staticPort, staticHost, () => {
-  console.log(`Client runtime config generated: ${runtimeConfigPath}`);
   console.log(`Client static server running: http://${staticHost}:${staticPort}`);
-  console.log(`Open demo page: http://${publicHost}:${staticPort}/client.html`);
+  console.log(`Open demo page: http://${publicHost}:${staticPort}/mobile_client.html`);
 });
 
 let shuttingDown = false;
