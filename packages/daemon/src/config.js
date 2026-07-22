@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
+import { normalizeRtcIceOptions, parseRtcIceServersJson } from './rtcConfig.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,14 +34,45 @@ function readBoolean(value, fallback = false) {
 
 const clientMessageTimeoutSeconds = readPositiveInt(process.env.DAEMON_CLIENT_MESSAGE_TIMEOUT_SECONDS, 120);
 
+// ICE config is single-sourced from RTC_ICE_SERVERS_JSON (the same variable the
+// client and agent use), with the individual STUN_SERVER_URLS/TURN_* vars kept
+// only as a fallback. normalizeRtcIceOptions derives stun/turn url lists and
+// credentials from whichever form is supplied, so downstream (server.js ->
+// daemon-agent.html query params) keeps working unchanged.
+const parsedRtcIceServers = parseRtcIceServersJson(process.env.RTC_ICE_SERVERS_JSON);
+if (String(process.env.RTC_ICE_SERVERS_JSON || '').trim() && !parsedRtcIceServers.length) {
+  console.warn('Ignoring invalid RTC_ICE_SERVERS_JSON in daemon .env.');
+}
+
+const hasExplicitIceEnv = [
+  process.env.STUN_SERVER_URLS,
+  process.env.TURN_SERVER_URLS,
+  process.env.TURN_USERNAME,
+  process.env.TURN_CREDENTIAL,
+].some((value) => String(value || '').trim());
+
+const runtimeIceConfig = normalizeRtcIceOptions(
+  hasExplicitIceEnv
+    ? {
+        stunUrls: process.env.STUN_SERVER_URLS,
+        turnUrls: process.env.TURN_SERVER_URLS,
+        turnUsername: process.env.TURN_USERNAME,
+        turnCredential: process.env.TURN_CREDENTIAL,
+      }
+    : {
+        rtcIceServers: parsedRtcIceServers,
+      }
+);
+
 export const config = {
   signalingServer: process.env.SIGNALING_SERVER || 'http://localhost:8095',
   daemonId: process.env.DAEMON_ID || 'daemon-1',
   defaultClientId: process.env.CLIENT_ID || 'client-1',
-  stunUrls: process.env.STUN_SERVER_URLS || '',
-  turnUrls: process.env.TURN_SERVER_URLS || '',
-  turnUsername: process.env.TURN_USERNAME || '',
-  turnCredential: process.env.TURN_CREDENTIAL || '',
+  stunUrls: runtimeIceConfig.stunUrls,
+  turnUrls: runtimeIceConfig.turnUrls,
+  turnUsername: runtimeIceConfig.turnUsername,
+  turnCredential: runtimeIceConfig.turnCredential,
+  rtcIceServers: runtimeIceConfig.rtcIceServers,
   staticServerHost: process.env.DAEMON_STATIC_HOST || '0.0.0.0',
   staticServerPort: Number(process.env.DAEMON_STATIC_PORT || 8788),
   browserHeadless: (process.env.BROWSER_HEADLESS || 'false').toLowerCase() === 'true',
