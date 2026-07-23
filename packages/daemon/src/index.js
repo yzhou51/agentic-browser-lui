@@ -218,6 +218,11 @@ function emitToolResult(data, { compact = false, isError = false } = {}) {
 }
 
 let clientMessageTimeoutHandle = null;
+// Pending `leave` grace timer -- see scheduleLeaveTermination(). Non-null means a
+// leave was received and we are waiting to see if the client reconnects (refresh)
+// before actually terminating the session (close).
+let pendingLeaveHandle = null;
+let pendingLeaveClientId = '';
 let currentClientMessageTimeoutMs = Number(config.clientMessageTimeoutMs || 120000);
 let latestTimeoutSnapshot = {
   path: '',
@@ -279,6 +284,8 @@ function completeSession(outcome, statusMessage = '') {
   }
 
   clearClientMessageTimeout();
+  // The session is ending now; any deferred leave timer is moot.
+  clearPendingLeave('session_completed');
   activeSession.outcome = outcome;
   activeSession.completedAt = Date.now();
   updateSessionProgress(SESSION_STAGES.FINISH, outcome, statusMessage);
@@ -384,6 +391,55 @@ async function handleTerminationMessage(options = {}) {
       outcome: activeSession.outcome,
     });
   }
+
+  return true;
+}
+
+// Cancel a pending leave grace timer, if any. Returns true if one was cancelled.
+function clearPendingLeave(reason = '') {
+  if (!pendingLeaveHandle) {
+    return false;
+  }
+  clearTimeout(pendingLeaveHandle);
+  pendingLeaveHandle = null;
+  const cancelledFor = pendingLeaveClientId;
+  pendingLeaveClientId = '';
+  logger.info('LEAVE_GRACE_CANCELLED', { reason, clientId: cancelledFor });
+  return true;
+}
+
+// Handle a `leave` message with a grace window instead of terminating right away.
+// A page refresh and a page close both emit `leave`; by deferring termination we
+// give a refreshing client a chance to reconnect (it will send `resolve` again),
+// in which case the resolve handler cancels this timer. If nobody reconnects, the
+// timer fires and we terminate the session as a genuine close.
+function scheduleLeaveTermination(options = {}) {
+  const { expectedActiveClientId, messageOrigin, payloadClientId } = options;
+  const originMatchesActiveClient = normalizeId(messageOrigin) && expectedActiveClientId && normalizeId(messageOrigin) === expectedActiveClientId;
+  const payloadMatchesActiveClient = normalizeId(payloadClientId) && expectedActiveClientId && normalizeId(payloadClientId) === expectedActiveClientId;
+  const accepted = Boolean(originMatchesActiveClient || payloadMatchesActiveClient || (activeSession.id && !activeSession.completedAt));
+
+  if (!accepted) {
+    return false;
+  }
+
+  // A repeated leave simply restarts the grace window.
+  if (pendingLeaveHandle) {
+    clearTimeout(pendingLeaveHandle);
+    pendingLeaveHandle = null;
+  }
+
+  pendingLeaveClientId = normalizeId(messageOrigin || payloadClientId) || String(activeSession.clientId || '');
+  const graceMs = Number(config.leaveGraceMs) || 8000;
+  logger.info('LEAVE_GRACE_STARTED', { graceMs, clientId: pendingLeaveClientId });
+
+  pendingLeaveHandle = setTimeout(() => {
+    pendingLeaveHandle = null;
+    pendingLeaveClientId = '';
+    // Grace window elapsed with no reconnect -> treat as a real page close.
+    logger.info('LEAVE_GRACE_ELAPSED', { clientId: options.payloadClientId || options.messageOrigin || '' });
+    void handleTerminationMessage(options);
+  }, graceMs);
 
   return true;
 }
@@ -1053,6 +1109,10 @@ if (process.argv.length > 2 && !toolModePayload) {
           const originMatchesActiveClient = normalizeId(messageOrigin) && expectedActiveClientId && normalizeId(messageOrigin) === expectedActiveClientId;
           const payloadMatchesActiveClient = normalizeId(payloadClientId) && expectedActiveClientId && normalizeId(payloadClientId) === expectedActiveClientId;
           if (originMatchesActiveClient || payloadMatchesActiveClient) {
+            // A resolve from the active client during a leave grace window means
+            // the client reconnected -- i.e. the previous `leave` was a page
+            // refresh, not a close. Cancel the deferred termination.
+            clearPendingLeave('reconnect_resolve');
             if (!activeSession.connected) {
               activeSession.connected = true;
               activeSession.connectedAt = Date.now();
@@ -1096,7 +1156,11 @@ if (process.argv.length > 2 && !toolModePayload) {
           });
         } else if (parsedType === 'leave') {
           const expectedActiveClientId = normalizeId(activeSession.clientId);
-          const acceptedLeave = await handleTerminationMessage({
+          // Defer termination behind a grace window instead of ending the session
+          // immediately: a refresh emits the same `leave` as a close. If the client
+          // reconnects (resolve) within config.leaveGraceMs, the resolve handler
+          // cancels this; otherwise the timer fires and terminates as a real close.
+          const scheduledLeave = scheduleLeaveTermination({
             expectedActiveClientId,
             messageOrigin,
             payloadClientId,
@@ -1110,7 +1174,8 @@ if (process.argv.length > 2 && !toolModePayload) {
           logger.info('LEAVE_RECEIVED', {
             origin: String(event?.origin || ''),
             payloadClientId,
-            acceptedLeave,
+            scheduledLeave,
+            graceMs: config.leaveGraceMs,
             requestId: parsedRequestId,
             bytes: messageBytes,
           });
@@ -1211,49 +1276,79 @@ if (process.argv.length > 2 && !toolModePayload) {
       : browser.shouldPreserveBrowserOnExit();
     const code = Number.isInteger(exitCode) ? exitCode : (Number.isInteger(process.exitCode) ? process.exitCode : 0);
     shuttingDown = true;
-    clearClientMessageTimeout();
 
-    if (toolModeRuntime) {
-      await toolModeRuntime.shutdownBrowser();
-    } else if (preserveBrowser) {
-      await new RemoteDevtoolsMode({
-        browser,
-        logger,
-        requestedRemoteDebuggingPort: browser.remoteDebuggingPort,
-      }).shutdownBrowser();
-    } else {
-      await new PutterMode({ browser, logger, reason: 'default runtime shutdown' }).shutdownBrowser();
+    // Absolute failsafe: whatever throws or blocks below, guarantee the process
+    // terminates. unref() so this timer never itself keeps the event loop alive.
+    // Without this, a stalled browser.disconnect()/server.close() (or a throw
+    // before process.exit) leaves the HTTP server, Chrome CDP socket and timers
+    // holding the loop open -- the daemon hangs and never exits.
+    const forceExitTimer = setTimeout(() => {
+      logger.warn(`Shutdown failsafe elapsed; forcing immediate exit (code ${code}).`);
+      process.exit(code);
+    }, 5000);
+    if (typeof forceExitTimer.unref === 'function') {
+      forceExitTimer.unref();
     }
-    const serverCloseGraceMs = 1500;
-    await Promise.race([
-      new Promise((resolve, reject) => {
-        server.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
 
-        if (typeof server.closeIdleConnections === 'function') {
-          server.closeIdleConnections();
+    try {
+      clearClientMessageTimeout();
+      clearPendingLeave('shutdown');
+
+      // Browser teardown is best-effort: a failure here must not prevent exit.
+      try {
+        if (toolModeRuntime) {
+          await toolModeRuntime.shutdownBrowser();
+        } else if (preserveBrowser) {
+          await new RemoteDevtoolsMode({
+            browser,
+            logger,
+            requestedRemoteDebuggingPort: browser.remoteDebuggingPort,
+          }).shutdownBrowser();
+        } else {
+          await new PutterMode({ browser, logger, reason: 'default runtime shutdown' }).shutdownBrowser();
         }
-      }),
-      new Promise((resolve) => {
-        setTimeout(() => {
-          if (typeof server.closeAllConnections === 'function') {
-            server.closeAllConnections();
+      } catch (error) {
+        logger.warn('Browser shutdown reported an error; continuing to exit.', {
+          error: error.message,
+        });
+      }
+
+      const serverCloseGraceMs = 1500;
+      await Promise.race([
+        new Promise((resolve, reject) => {
+          server.close((error) => {
+            if (error) {
+              reject(error);
+              return;
+            }
+            resolve();
+          });
+
+          if (typeof server.closeIdleConnections === 'function') {
+            server.closeIdleConnections();
           }
-          logger.warn(`Server close grace period elapsed (${serverCloseGraceMs}ms). Forcing daemon exit.`);
-          resolve();
-        }, serverCloseGraceMs);
-      }),
-    ]).catch((error) => {
-      logger.warn('Server close reported an error during shutdown; continuing to exit.', {
-        error: error.message,
+        }),
+        new Promise((resolve) => {
+          setTimeout(() => {
+            if (typeof server.closeAllConnections === 'function') {
+              server.closeAllConnections();
+            }
+            logger.warn(`Server close grace period elapsed (${serverCloseGraceMs}ms). Forcing daemon exit.`);
+            resolve();
+          }, serverCloseGraceMs);
+        }),
+      ]).catch((error) => {
+        logger.warn('Server close reported an error during shutdown; continuing to exit.', {
+          error: error.message,
+        });
       });
-    });
-    process.exit(code);
+    } finally {
+      // Guaranteed exit: runs even if the try body threw, so a rejected
+      // shutdown() can never leave the daemon alive on the retry (the
+      // shuttingDown guard would otherwise make the second call a no-op).
+      clearTimeout(forceExitTimer);
+      process.exit(code);
+    }
   };
   process.once('SIGINT', () => shutdown(null));
   process.once('SIGTERM', () => shutdown(null));

@@ -82,5 +82,10 @@ export const config = {
   daemonLogLevel: process.env.DAEMON_LOG_LEVEL || process.env.LOG_LEVEL || 'info',
   daemonLogFile: process.env.DAEMON_LOG_FILE || '/var/log/agent-browser-daemon.log',
   clientMessageTimeoutMs: clientMessageTimeoutSeconds * 1000,
+  // Grace window after a `leave` before the session is actually terminated. A
+  // page refresh and a page close both emit `leave`; if the same client
+  // reconnects within this window we treat it as a refresh and cancel the
+  // termination. Only a genuine close lets the timer elapse.
+  leaveGraceMs: readPositiveInt(process.env.DAEMON_LEAVE_GRACE_MS, 8000),
   timeoutSnapshotDir: process.env.DAEMON_TIMEOUT_SNAPSHOT_DIR || path.resolve(__dirname, '../log/snapshots'),
 };

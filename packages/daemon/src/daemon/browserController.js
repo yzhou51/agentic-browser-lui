@@ -1705,8 +1705,11 @@ export class BrowserController {
       return;
     }
 
+    // Puppeteer's disconnect() returns a Promise; await it inside try/catch so a
+    // rejection can't escape as an unhandled rejection. The caller's shutdown
+    // failsafe covers the case where the CDP socket never closes cleanly.
     try {
-      this.browser.disconnect();
+      await this.browser.disconnect();
     } catch {
       // Best effort only.
     }
