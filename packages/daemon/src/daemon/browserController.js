@@ -453,11 +453,11 @@ export class BrowserController {
   }
 
   getRuntimeMode() {
-    return this.browserConnectionMode === 'attached' ? 'remote-devtools' : 'putter';
+    return this.browserConnectionMode === 'attached' ? 'CDP' : 'putter';
   }
 
   shouldPreserveBrowserOnExit() {
-    return this.getRuntimeMode() === 'remote-devtools';
+    return this.getRuntimeMode() === 'CDP';
   }
 
   async launchIfNeeded() {

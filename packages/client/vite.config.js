@@ -1,14 +1,14 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
-import { buildClientRuntimeConfig, serializeClientRuntimeConfig } from './src/runtimeConfig.js';
+import { buildClientRuntimeConfig, serializeClientRuntimeConfig } from './src/config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Serve /client.runtime.json from the same generator `pnpm start` uses, so the
 // dev/preview server and the static server share a single source of truth
-// (.env + src/runtimeConfig.js) instead of a checked-in public/ copy.
+// (.env + src/config.js) instead of a checked-in public/ copy.
 function clientRuntimeConfigPlugin() {
   const handler = (req, res, next) => {
     const pathname = (req.url || '').split('?')[0];

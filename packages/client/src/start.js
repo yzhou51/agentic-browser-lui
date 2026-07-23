@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-import { writeClientRuntimeConfig } from './runtimeConfig.js';
+import { writeClientRuntimeConfig } from './config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,7 +17,7 @@ const staticPort = Number(process.env.CLIENT_STATIC_PORT || 5174);
 const publicHost = staticHost === '0.0.0.0' ? os.hostname() : staticHost;
 
 // Generate the config the client fetches at /client.runtime.json. This uses the
-// same generator the Vite dev/preview server uses (src/runtimeConfig.js), so
+// same generator the Vite dev/preview server uses (src/config.js), so
 // `pnpm start` and `pnpm dev` derive their config from one source: .env + that module.
 const runtimeConfig = writeClientRuntimeConfig();
 console.log(

@@ -3,11 +3,11 @@ export class RemoteDevtoolsMode {
     this.browser = browser;
     this.logger = logger;
     this.requestedRemoteDebuggingPort = requestedRemoteDebuggingPort;
-    this.name = 'remote-devtools';
+    this.name = 'CDP';
   }
 
   async shutdownBrowser() {
-    this.logger.info('Daemon shutdown in remote-devtools mode: preserving Chrome and target page; daemon process will exit only.', {
+    this.logger.info('Daemon shutdown in CDP mode: preserving Chrome and target page; daemon process will exit only.', {
       requestedRemoteDebuggingPort: this.requestedRemoteDebuggingPort,
     });
     await this.browser.disconnectBrowser();
@@ -46,7 +46,7 @@ function normalizePort(value) {
 
 export function createToolModeRuntime({ browser, logger, requestedRemoteDebuggingPort }) {
   const requestedPort = normalizePort(requestedRemoteDebuggingPort);
-  const attachedToRemote = browser.getRuntimeMode() === 'remote-devtools';
+  const attachedToRemote = browser.getRuntimeMode() === 'CDP';
 
   if (requestedPort && attachedToRemote) {
     return new RemoteDevtoolsMode({

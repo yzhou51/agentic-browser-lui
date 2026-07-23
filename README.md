@@ -166,7 +166,7 @@ Use this when you want the daemon to launch Chrome automatically via Puppeteer.
    - Click `Connect` and use controls to interact with the target
 
 **Mode Behavior:**
-- **remote-devtools**: Daemon exits but preserves Chrome and target page (useful for manual inspection)
+- **CDP**: Daemon exits but preserves Chrome and target page (useful for manual inspection)
 - **putter**: Daemon closes Chrome and target page on exit (clean shutdown)
 
 ## Headless Mode for Full Page Capture
@@ -231,16 +231,16 @@ sequenceDiagram
     participant Signal as OWT Signaling
     participant Client
 
-    Note over Agent,Client: Agent provides session info (signalingServer, daemonId, clientId) to Client out-of-band
+    Note over Agent,Client: Agent provides session info (sessionId) to Client out-of-band
 
-    par User opens mobile client page (can be before daemon starts)
+    par User opens client page (can be before daemon starts)
         Client->>Signal: Connect to OWT signaling server
     end
 
-    Agent->>Daemon: Start via CLI (daemonId, clientId, targetUrl, timeout)
+    Agent->>Daemon: Start via CLI (sessionId, targetUrl, timeout)
 
-    alt remote-debugging-port provided and Chrome already running
-        Daemon->>Daemon: Attach to existing Chrome (remote-devtools mode)
+    alt CDP provided and Chrome already running
+        Daemon->>Daemon: Attach to existing Chrome (CDP mode)
     else otherwise
         Daemon->>Daemon: Launch new Chrome via Puppeteer (putter mode)
     end
@@ -250,7 +250,7 @@ sequenceDiagram
     DaemonPage->>Signal: Connect to OWT signaling server
 
     loop retry on timeout (2s deadline,  5 attempts)
-        Client->>DaemonPage: Send Resolve over OWT data channel
+        Client->>DaemonPage: Send Resolve over signal channel
         DaemonPage-->>Client: Send resolve_ack (acknowledgment)
     end
 
@@ -268,20 +268,21 @@ sequenceDiagram
     alt Client page closes or navigates away
         Client->>DaemonPage: Send Leave (best-effort, 500ms window)
         DaemonPage->>Signal: Disconnect from signaling
+        Daemon->>Daemon: Leave Grace to avoid client refresh 
         Daemon->>Daemon: Capture leave snapshot
         Daemon->>Agent: Session completes with outcome=leave
     else User clicks Finish button
-        Client->>DaemonPage: Send Finish over data channel
+        Client->>DaemonPage: Send Finish over signal channel
         DaemonPage->>Signal: Disconnect from signaling
         Daemon->>Daemon: Capture finish snapshot
         Daemon->>Agent: Session completes with outcome=success
     else No client message within timeout window
         Daemon->>Daemon: Capture timeout snapshot
-        Daemon->>Client: Send timeout_notice over data channel
+        Daemon->>Client: Send timeout_notice over signal channel
         Daemon->>Agent: Session completes with outcome=timeout
     end
 
-    alt remote-devtools mode
+    alt CDP mode
         Daemon->>Daemon: Exit daemon process, preserve Chrome and target page
     else putter mode
         Daemon->>Daemon: Close target page and Chrome, then exit

@@ -63,12 +63,12 @@ If a remote-debugging port is configured and a Chrome instance is already runnin
 
 Daemon now uses two runtime modes:
 
-- `remote-devtools` mode:
+- `CDP` mode:
   - In tool mode, activated only when `--remote-debugging-port` is passed and attach succeeds.
   - On daemon exit, Chrome and target page are preserved.
   - Automated resolve uses direct `getDisplayMedia` auto-select path (extension `tabCapture` is skipped).
 - `putter` mode:
-  - Activated when `--remote-debugging-port` is not passed in tool mode, or when remote-devtools attach fails (fallback).
+  - Activated when `--remote-debugging-port` is not passed in tool mode, or when CDP attach fails (fallback).
   - On daemon exit, daemon closes target page and Chrome.
 
 For automatic share to work reliably when attaching to an existing Chrome, that Chrome should be started with the same capture-related flags and profile assumptions used by daemon launch:
@@ -206,7 +206,7 @@ Top-level fields:
   - `true`: session completed with success (`finish` accepted).
   - `false`: session ended with timeout or error.
 - `mode` (`string`): selected runtime mode for this tool invocation.
-  - `remote-devtools`: `--remote-debugging-port` was provided and attach succeeded.
+  - `CDP`: `--remote-debugging-port` was provided and attach succeeded.
   - `putter`: no `--remote-debugging-port` provided, or attach failed and daemon fell back.
 - `stage` (`string`): current/final stage value.
 - `status` (`string`): current/final status value.
@@ -222,7 +222,7 @@ Interpretation guidance:
 - Leave condition: `ok=false` and `status=leave` (client disconnected before finish).
 - Error condition: `ok=false` and `status=error`.
 - Mode-specific shutdown expectation:
-  - `mode=remote-devtools`: daemon exits and preserves Chrome/target page.
+  - `mode=CDP`: daemon exits and preserves Chrome/target page.
   - `mode=putter`: daemon exits and closes target page + Chrome.
 
 Stages:
