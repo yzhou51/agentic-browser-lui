@@ -2,11 +2,14 @@ export async function loadClientRuntimeConfig(runtimePath = '/client-demo.runtim
   try {
     const response = await fetch(runtimePath, { cache: 'no-store' });
     if (!response.ok) {
+      console.warn(`[client] Runtime config not found at ${runtimePath} (${response.status} ${response.statusText}). Using defaults.`);
       return {};
     }
     const config = await response.json();
+    console.info(`[client] Runtime config loaded from ${runtimePath}`, config);
     return config && typeof config === 'object' ? config : {};
-  } catch {
+  } catch (error) {
+    console.warn(`[client] Failed to load runtime config from ${runtimePath}:`, error.message);
     return {};
   }
 }

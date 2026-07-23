@@ -101,6 +101,41 @@ If existing Chrome is missing these flags/policies, daemon can still operate wit
 
 When no peer message is received from the current client within timeout window (tool mode), daemon captures a full-page PNG snapshot of the current target page, saves it to snapshot directory, and marks session stage/status as `finish` / `timeout`.
 
+## Client Lifecycle Messages
+
+The client sends lifecycle control messages over the OWT P2P data channel. Daemon handles three termination signals:
+
+| Message | Sender trigger | Daemon action |
+|---------|---------------|---------------|
+| `leave` | Client page closes (browser tab closed, window closed, navigation away) | Session completed with outcome `leave`; signaling disconnected |
+| `finish` | User explicitly clicks the finish button in client UI | Session completed with outcome `success`; finish snapshot captured |
+| `timeout` | Client-side inactivity timer fires | Session completed with outcome `timeout`; timeout snapshot captured |
+
+### Flow: `leave`
+
+1. Client detects `pagehide` or `beforeunload` browser event.
+2. Client sends `{ type: 'leave', payload: { clientId, reason } }` over data channel with up to 500ms delivery window.
+3. Daemon-agent page (`daemon-agent.js`) receives message, logs it, sets `intentionalDisconnect = true`, and calls `disconnect()` to leave the signaling server.
+4. Node daemon (`index.js` `onAgentEvent`) receives the `peer_message` event, calls `completeSession('leave', ...)`, which clears the client message timeout and notifies any session completion waiters.
+
+### Flow: `finish`
+
+1. User clicks Finish in the client UI.
+2. Client sends `{ type: 'finish', payload: { clientId, reason } }` over data channel.
+3. Daemon-agent page receives message, sets `intentionalDisconnect = true`, and calls `disconnect()`.
+4. Node daemon receives event, captures a finish snapshot, calls `completeSession('success', ...)`, and enqueues a `finish_ack` peer notice back to the client.
+
+### Flow: `timeout`
+
+1. Client-side inactivity timer fires after no meaningful user activity.
+2. Client sends `{ type: 'timeout', payload: { clientId, reason } }` over data channel.
+3. Daemon-agent page receives message, sets `intentionalDisconnect = true`, and calls `disconnect()`.
+4. Node daemon's own independent client message timeout may also fire and capture a snapshot if no other message has been received.
+
+### Intentional Disconnect Flag
+
+When daemon-agent processes any termination message, it immediately sets `intentionalDisconnect = true` before calling the async `disconnect()`. This prevents race conditions where the P2P client's internal reconnect logic could re-establish the signaling connection before the graceful shutdown completes.
+
 ## REST API (Agent Workflow)
 
 Base URL defaults to `http://localhost:8788`.
@@ -306,6 +341,7 @@ Interpretation guidance:
 
 - Success condition: `ok=true` and `status=success`.
 - Timeout condition: `ok=false` and `status=timeout`.
+- Leave condition: `ok=false` and `status=leave` (client disconnected before finish).
 - Error condition: `ok=false` and `status=error`.
 - Mode-specific shutdown expectation:
   - `mode=remote-devtools`: daemon exits and preserves Chrome/target page.
@@ -345,10 +381,11 @@ Tool-mode optional params:
 
 Exit behavior in tool mode:
 
-- On timeout: capture snapshot and return timeout status.
+- On `timeout` (no client message within window): capture snapshot and return timeout status.
 - On `finish` message from client: capture snapshot and return success status.
-- A client `finish` can complete the session even if `resolve` was not received yet.
-- In both cases, tool-mode exits after emitting the final JSON result.
+- On `leave` message from client: complete session with `leave` outcome (no snapshot).
+- A client `finish` or `leave` can complete the session even if `resolve` was not received yet.
+- In all cases, tool-mode exits after emitting the final JSON result.
 - On tool-mode terminal exit, daemon process shuts down but does not explicitly close Chrome or target page.
 
 Tool-mode result payload includes:

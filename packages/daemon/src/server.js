@@ -15,12 +15,20 @@ const MIME_TYPES = {
   '.map': 'application/json; charset=utf-8',
 };
 
-function resolveSafePath(rootDir, browserModuleDir, reqPath) {
+function resolveSafePath(rootDir, browserModuleDir, clientSdkDir, reqPath) {
   const rawPath = decodeURIComponent(reqPath.split('?')[0]);
   if (rawPath.startsWith('/daemon-src/')) {
     const relativeModulePath = rawPath.replace(/^\/daemon-src\//, '');
     const candidate = path.resolve(browserModuleDir, relativeModulePath);
     if (!candidate.startsWith(path.resolve(browserModuleDir))) {
+      return null;
+    }
+    return candidate;
+  }
+  if (clientSdkDir && rawPath.startsWith('/client-sdk/')) {
+    const relativeModulePath = rawPath.replace(/^\/client-sdk\//, '');
+    const candidate = path.resolve(clientSdkDir, relativeModulePath);
+    if (!candidate.startsWith(path.resolve(clientSdkDir))) {
       return null;
     }
     return candidate;
@@ -174,6 +182,7 @@ function normalizeSnapshotOptions(source = {}, query = null) {
 export function startStaticServer({
   rootDir,
   browserModuleDir,
+  clientSdkDir,
   host,
   port,
   getDaemonAgentConfig,
@@ -664,10 +673,6 @@ export function startStaticServer({
             turnUsername,
             turnCredential,
           });
-          const resetConnection = enqueueAgentCommand('disconnect', {
-            reason: 'take_action_reset',
-            requestId,
-          });
           const connectOnly = enqueueAgentCommand('connect_only', {
             daemonId,
             clientId,
@@ -677,13 +682,12 @@ export function startStaticServer({
             turnUsername,
             turnCredential,
             requestId,
-            forceReconnect: true,
           });
 
           writeJson(res, 200, {
             ok: true,
             requestId,
-            commandIds: [setSession.id, resetConnection.id, connectOnly.id],
+            commandIds: [setSession.id, connectOnly.id],
             bootstrappedAgent: bridge.bootstrapped,
           });
         })
@@ -714,7 +718,7 @@ export function startStaticServer({
       return;
     }
 
-    const filePath = resolveSafePath(rootDir, browserModuleDir, req.url);
+    const filePath = resolveSafePath(rootDir, browserModuleDir, clientSdkDir, req.url);
     if (!filePath) {
       res.writeHead(403);
       res.end('Forbidden');

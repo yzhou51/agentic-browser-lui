@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Agentic Browser Client Demo</title>
+    <title>Direct User Control</title>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
@@ -11,10 +11,7 @@
       <section class="panel setup">
         <h1>Agentic Browser Client</h1>
         <p id="status" class="status" data-state="idle">Idle. Not connected to daemon.</p>
-        <div class="actions">
-          <a class="page-link-button" href="http://localhost:5175/agent.html" target="_blank" rel="noopener noreferrer">Open Agent Page</a>
-          <a class="page-link-button" href="/mobile_client.html">Open Mobile Client</a>
-        </div>
+        <p id="terminalNotice" class="status" data-state="idle" hidden></p>
         <p class="subgroup-note">Need daemon control actions? Open <a href="http://localhost:5175/agent.html" target="_blank" rel="noopener noreferrer">Agent page</a>.</p>
         <div class="subgroup">
           <h2>Client</h2>

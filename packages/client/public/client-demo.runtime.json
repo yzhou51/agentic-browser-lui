@@ -1,0 +1,10 @@
+{
+  "signalingServer": "http://localhost:8095",
+  "clientId": "client-1",
+  "daemonId": "daemon-1",
+  "stunUrls": [],
+  "turnUrls": [],
+  "turnUsername": "",
+  "turnCredential": "",
+  "rtcIceServers": []
+}

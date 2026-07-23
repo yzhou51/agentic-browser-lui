@@ -17,6 +17,7 @@ const staticPort = Number(process.env.CLIENT_STATIC_PORT || 5174);
 const signalingServer = process.env.SIGNALING_SERVER || 'http://localhost:8095';
 const clientId = process.env.CLIENT_ID || 'client-1';
 const daemonId = process.env.DAEMON_ID || 'daemon-1';
+const headless = String(process.env.BROWSER_HEADLESS || 'false').toLowerCase() === 'true';
 
 const parsedRtcIceServers = parseRtcIceServersJson(process.env.RTC_ICE_SERVERS_JSON);
 if (String(process.env.RTC_ICE_SERVERS_JSON || '').trim() && !parsedRtcIceServers.length) {
@@ -53,6 +54,7 @@ fs.writeFileSync(
       signalingServer,
       clientId,
       daemonId,
+      headless,
       stunUrls: runtimeIceConfig.stunUrls,
       turnUrls: runtimeIceConfig.turnUrls,
       turnUsername: runtimeIceConfig.turnUsername,
@@ -145,9 +147,8 @@ server.on('error', (error) => {
 });
 
 server.listen(staticPort, staticHost, () => {
-  console.log(`Client runtime config generated: ${runtimeConfigPath}`);
   console.log(`Client static server running: http://${staticHost}:${staticPort}`);
-  console.log(`Open demo page: http://${publicHost}:${staticPort}/client.html`);
+  console.log(`Open demo page: http://${publicHost}:${staticPort}/mobile_client.html`);
 });
 
 let shuttingDown = false;

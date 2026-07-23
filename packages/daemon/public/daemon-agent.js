@@ -1,6 +1,7 @@
 /* global Owt */
 
-import { createDaemonP2PClient } from '/daemon-src/p2pClient.browser.js';
+import { AgenticBrowserClient } from '/client-sdk/AgenticBrowserClient.js';
+import { decodeMouseCommandBinary } from '/client-sdk/mouseCommandBinary.js';
 
 async function loadRuntimeConfig() {
   try {
@@ -114,6 +115,9 @@ async function loadRuntimeConfig() {
   let controlTargetMode = null;
   let agentCommandCursor = 0;
   let pollingAgentCommands = false;
+  let daemonOnlineAnnounceTimer = null;
+  let resolveSeen = false;
+  let resolveInProgress = false;
 
   function setStatus(text) {
     statusEl.textContent = text;
@@ -138,6 +142,14 @@ async function loadRuntimeConfig() {
     }
   }
 
+  function estimateBytes(value) {
+    const text = typeof value === 'string' ? value : String(value ?? '');
+    if (typeof TextEncoder === 'function') {
+      return new TextEncoder().encode(text).length;
+    }
+    return text.length;
+  }
+
   async function submitLocalDaemonCommand(command) {
     const response = await fetch('/daemon-agent.command', {
       method: 'POST',
@@ -153,6 +165,88 @@ async function loadRuntimeConfig() {
     }
 
     return payload;
+  }
+
+  async function sendPeerMessageWithMetrics(targetId, message, options) {
+    return p2pClient.sendPeerMessage(targetId, message, options);
+  }
+
+  function stopDaemonOnlineAnnouncements() {
+    if (daemonOnlineAnnounceTimer) {
+      window.clearInterval(daemonOnlineAnnounceTimer);
+      daemonOnlineAnnounceTimer = null;
+    }
+  }
+
+  async function announceDaemonOnline(reason = 'interval') {
+    if (resolveSeen || !p2pClient.isConnected()) {
+      console.debug('[daemon-agent] daemon_online skipped', {
+        reason,
+        resolveSeen,
+        connected: p2pClient.isConnected(),
+      });
+      return;
+    }
+
+    const daemonId = uidInput.value.trim();
+    const clientId = remoteInput.value.trim();
+    const signalingServer = hostInput.value.trim();
+    if (!daemonId || !clientId || !signalingServer) {
+      console.debug('[daemon-agent] daemon_online skipped due to missing session fields', {
+        reason,
+        daemonId,
+        clientId,
+        signalingServer,
+      });
+      return;
+    }
+
+    const timeoutMs = Number(runtimeConfig?.clientMessageTimeoutMs) || 0;
+
+    try {
+      await sendPeerMessageWithMetrics(
+        clientId,
+        {
+          type: 'daemon_online',
+          requestId: `daemon-online-${Date.now()}`,
+          payload: {
+            daemonId,
+            clientId,
+            signalingServer,
+            reason,
+            timeoutMs,
+          },
+        },
+        { label: 'daemon_online' }
+      );
+      console.debug('[daemon-agent] daemon_online sent', {
+        reason,
+        daemonId,
+        clientId,
+        signalingServer,
+      });
+      appendMessage(`daemon_online sent to ${clientId} (${reason})`);
+    } catch (error) {
+      console.warn('[daemon-agent] daemon_online send failed', {
+        reason,
+        daemonId,
+        clientId,
+        signalingServer,
+        error: error?.message,
+      });
+      appendMessage(`daemon_online send failed (${reason}): ${error?.message || 'unknown error'}`);
+    }
+  }
+
+  function startDaemonOnlineAnnouncements() {
+    //stopDaemonOnlineAnnouncements();
+    resolveSeen = false;
+
+    daemonOnlineAnnounceTimer = window.setInterval(() => {
+      announceDaemonOnline('interval').catch(() => {});
+    }, 1000);
+
+    announceDaemonOnline('connected').catch(() => {});
   }
 
   function buildPuppeteerOnlyFailure(command, error) {
@@ -175,6 +269,72 @@ async function loadRuntimeConfig() {
       return 'Screen share is unavailable because this browser does not expose getDisplayMedia.';
     }
     return null;
+  }
+
+  // Pipeline stage: decode received raw message into a normalized command object.
+  // Binary ArrayBuffer → decoded fields wrapped in { type, payload } envelope.
+  // Base64-encoded binary with __isBinary marker → decoded back to ArrayBuffer then to command.
+  // JSON string       → parsed as-is (already has { type, requestId, payload } shape).
+  // All paths produce the same envelope so all downstream handling is uniform.
+  function decodeIncomingMessage(rawMessage) {
+    if (rawMessage && typeof rawMessage === 'object') {
+      // Some OWT stacks wrap actual payload under message/data.
+      if (Object.prototype.hasOwnProperty.call(rawMessage, 'message')) {
+        return decodeIncomingMessage(rawMessage.message);
+      }
+      if (Object.prototype.hasOwnProperty.call(rawMessage, 'data')) {
+        return decodeIncomingMessage(rawMessage.data);
+      }
+
+      // Some OWT builds deliver already-parsed objects.
+      if (typeof rawMessage.type === 'string') {
+        return rawMessage;
+      }
+
+      // Typed array / DataView payloads should be treated as binary.
+      if (ArrayBuffer.isView(rawMessage)) {
+        const view = rawMessage;
+        const sliced = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+        const decoded = decodeMouseCommandBinary(sliced);
+        if (!decoded) {
+          throw new Error('Failed to decode binary message from typed array');
+        }
+        const { commandType, ...fields } = decoded;
+        return { type: commandType, payload: fields };
+      }
+    }
+
+    if (typeof rawMessage === 'string') {
+      const parsed = JSON.parse(rawMessage);
+      // Check for base64-encoded binary marker
+      if (parsed.__isBinary && typeof parsed.payload === 'string') {
+        const base64Data = parsed.payload;
+        const binaryString = atob(base64Data);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        const arrayBuffer = bytes.buffer;
+        const decoded = decodeMouseCommandBinary(arrayBuffer);
+        if (!decoded) {
+          throw new Error('Failed to decode binary message');  
+        }
+        const { commandType, ...fields } = decoded;
+        return { type: commandType, payload: fields };
+      }
+      return parsed;
+    }
+
+    if (rawMessage instanceof ArrayBuffer) {
+      const decoded = decodeMouseCommandBinary(rawMessage);
+      if (!decoded) {
+        throw new Error('Failed to decode binary message');
+      }
+      const { commandType, ...fields } = decoded;
+      return { type: commandType, payload: fields };
+    }
+
+    return JSON.parse(String(rawMessage || ''));
   }
 
   function normalizeTargetUrl(url) {
@@ -220,167 +380,210 @@ async function loadRuntimeConfig() {
     });
   }
 
-  const p2pClient = createDaemonP2PClient({
-    windowObject: window,
-    getSessionConfig: () => ({
-      daemonId: uidInput.value.trim(),
-      clientId: remoteInput.value.trim(),
-      signalingServer: hostInput.value.trim(),
-      stunUrls: stunUrlsInput?.value || '',
-      turnUrls: turnUrlsInput?.value || '',
-      turnUsername: turnUsernameInput?.value || '',
-      turnCredential: turnCredentialInput?.value || '',
-    }),
-    onServerDisconnected: ({ daemonId, clientId, signalingServer }) => {
-      console.log('[daemon-agent] signaling server disconnected', { daemonId, remoteId: clientId, signalingHost: signalingServer });
-      setStatus('Disconnected from signaling server.');
-      appendMessage('signaling server disconnected');
-    },
-    onMessage: async (e) => {
-      console.log('[daemon-agent] message received', {
-        origin: e.origin,
-        message: e.message,
+  async function processResolveMessage(incomingOrigin, command) {
+    if (resolveInProgress) {
+      appendMessage(`resolve ignored while previous resolve is still in progress (${command.requestId || 'n/a'})`);
+      return;
+    }
+
+    resolveInProgress = true;
+    try {
+      resolveSeen = true;
+      stopDaemonOnlineAnnouncements();
+      console.log('[daemon-agent] resolve message received', {
+        origin: incomingOrigin,
+        requestId: command.requestId,
+        payload: command.payload || {},
       });
-      appendMessage(`from ${e.origin}: ${e.message}`);
+      appendMessage(`resolve received from ${incomingOrigin || 'unknown'} (${command.requestId || 'n/a'})`);
+
+      await sendPeerMessageWithMetrics(
+        incomingOrigin,
+        {
+          type: 'resolve_ack',
+          requestId: command.requestId,
+        },
+        { label: 'resolve_ack' }
+      );
+
+      controlTargetMode = 'puppeteer';
+      await p2pClient.ensureConnected();
+
+      try {
+        window.focus();
+        console.debug('[daemon-agent] resolve requested window focus before capture');
+      } catch (focusError) {
+        console.warn('[daemon-agent] resolve window focus failed', {
+          requestId: command.requestId,
+          error: focusError.message,
+        });
+      }
+
+      let preparedTarget = null;
+      try {
+        preparedTarget = await submitLocalDaemonCommand({ type: 'prepare_share_target', payload: {} });
+        console.debug('[daemon-agent] prepared share target before capture', preparedTarget);
+        appendMessage(`share target prepared: ${JSON.stringify(preparedTarget)}`);
+      } catch (prepareError) {
+        console.warn('[daemon-agent] prepare share target failed', {
+          requestId: command.requestId,
+          error: prepareError.message,
+        });
+        appendMessage(`prepare share target failed: ${prepareError.message}`);
+      }
+
+      await shareScreen({
+        automated: true,
+        targetHints: {
+          targetUrl: String(preparedTarget?.targetPage?.url || ''),
+        },
+      });
+      if (!screenStream) {
+        throw new Error('share failed or was cancelled by user.');
+      }
+
+      await sendPeerMessageWithMetrics(
+        incomingOrigin,
+        {
+          type: 'resolve_result',
+          requestId: command.requestId,
+          ok: true,
+          result: {
+            message: 'resolve accepted; sharing started',
+          },
+        },
+        { label: 'resolve_result success' }
+      );
+
+      postAgentEvent({
+        kind: 'peer_command_result',
+        requestId: command.requestId,
+        type: 'resolve',
+        ok: true,
+        message: 'resolve accepted; sharing started',
+        error: '',
+        bridge: 'signaling',
+      }).catch(() => {});
+    } catch (resolveError) {
+      console.error('[daemon-agent] resolve processing failed', {
+        requestId: command.requestId,
+        error: resolveError.message,
+      });
+      appendMessage(`resolve failed: ${resolveError.message}`);
+
+      await sendPeerMessageWithMetrics(
+        incomingOrigin,
+        {
+          type: 'resolve_result',
+          requestId: command.requestId,
+          ok: false,
+          error: resolveError.message,
+        },
+        { label: 'resolve_result failure' }
+      );
+
+      postAgentEvent({
+        kind: 'peer_command_result',
+        requestId: command.requestId,
+        type: 'resolve',
+        ok: false,
+        message: '',
+        error: resolveError.message,
+        bridge: 'signaling',
+      }).catch(() => {});
+    } finally {
+      resolveInProgress = false;
+    }
+  }
+
+  const p2pClient = new AgenticBrowserClient();
+
+  p2pClient.onDisconnect = () => {
+    const daemonId = uidInput.value.trim();
+    const clientId = remoteInput.value.trim();
+    const signalingServer = hostInput.value.trim();
+    console.log('[daemon-agent] signaling server disconnected', { daemonId, remoteId: clientId, signalingHost: signalingServer });
+    setStatus('Disconnected from signaling server.');
+    appendMessage('signaling server disconnected');
+  };
+
+  // Serializes processing of incoming peer commands in strict arrival order. See the matching
+  // comment in daemon-cli.js for the full rationale: without this, concurrently-processed
+  // commands with variable-latency Puppeteer/CDP round trips can complete out of arrival order,
+  // causing Puppeteer's "'left' is already pressed."/"'left' is not pressed." errors on rapid
+  // mouse_down/mouse_up/mouse_click sequences.
+  let inboundMessageQueue = Promise.resolve();
+
+  async function handleIncomingPeerMessage(e) {
+      const incomingOrigin = String(e?.origin || e?.from || remoteInput.value || '').trim();
+      const incomingMessage = e?.message ?? e?.data;
+
+      console.debug('[daemon-agent] message received', {
+        origin: incomingOrigin,
+        bytes: estimateBytes(incomingMessage),
+      });
+      appendMessage(`from ${incomingOrigin || 'unknown'}: ${estimateBytes(incomingMessage)} bytes`);
       postAgentEvent({
         kind: 'peer_message',
-        origin: e.origin,
-        message: e.message,
+        origin: incomingOrigin,
+        message: incomingMessage,
       }).catch(() => {});
 
       try {
-        const command = JSON.parse(e.message);
+        // Pipeline stage: receive → decode → command object
+        const command = decodeIncomingMessage(incomingMessage);
         const normalizedType = String(command?.type || '').trim().toLowerCase();
+        console.log('[daemon-agent] decoded peer message', {
+          origin: incomingOrigin,
+          normalizedType,
+          requestId: command?.requestId || '',
+        });
 
-        if (normalizedType === 'resolve') {
-          console.log('[daemon-agent] resolve message received', {
-            origin: e.origin,
-            requestId: command.requestId,
-            payload: command.payload || {},
-          });
-          appendMessage(`resolve received from ${e.origin} (${command.requestId || 'n/a'})`);
-
-          controlTargetMode = 'puppeteer';
-
-          try {
-            await p2pClient.ensureConnected();
-
-            try {
-              window.focus();
-              console.log('[daemon-agent] resolve requested window focus before capture');
-            } catch (focusError) {
-              console.log('[daemon-agent] resolve window focus failed', {
-                requestId: command.requestId,
-                error: focusError.message,
-              });
-            }
-
-            let preparedTarget = null;
-            try {
-              preparedTarget = await submitLocalDaemonCommand({ type: 'prepare_share_target', payload: {} });
-              console.log('[daemon-agent] prepared share target before capture', preparedTarget);
-              appendMessage(`share target prepared: ${JSON.stringify(preparedTarget)}`);
-            } catch (prepareError) {
-              console.log('[daemon-agent] prepare share target failed', {
-                requestId: command.requestId,
-                error: prepareError.message,
-              });
-              appendMessage(`prepare share target failed: ${prepareError.message}`);
-            }
-
-            await shareScreen({
-              automated: true,
-              targetHints: {
-                targetUrl: String(preparedTarget?.targetPage?.url || ''),
-              },
-            });
-            if (!screenStream) {
-              throw new Error('share failed or was cancelled by user.');
-            }
-
-            await p2pClient.sendPeerMessage(
-              e.origin,
-              {
-                type: 'resolve_result',
-                requestId: command.requestId,
-                ok: true,
-                result: {
-                  message: 'resolve accepted; sharing started',
-                },
-              },
-              { label: 'resolve_result success' }
-            );
-
-            postAgentEvent({
-              kind: 'peer_command_result',
-              requestId: command.requestId,
-              type: 'resolve',
-              ok: true,
-              message: 'resolve accepted; sharing started',
-              error: '',
-              bridge: 'p2p',
-            }).catch(() => {});
-          } catch (resolveError) {
-            console.log('[daemon-agent] resolve processing failed', {
-              requestId: command.requestId,
-              error: resolveError.message,
-            });
-            appendMessage(`resolve failed: ${resolveError.message}`);
-
-            await p2pClient.sendPeerMessage(
-              e.origin,
-              {
-                type: 'resolve_result',
-                requestId: command.requestId,
-                ok: false,
-                error: resolveError.message,
-              },
-              { label: 'resolve_result failure' }
-            );
-
-            postAgentEvent({
-              kind: 'peer_command_result',
-              requestId: command.requestId,
-              type: 'resolve',
-              ok: false,
-              message: '',
-              error: resolveError.message,
-              bridge: 'p2p',
-            }).catch(() => {});
-          }
+        if (normalizedType === 'resolve' || normalizedType === 'resolve-act') {
+          await processResolveMessage(incomingOrigin, command);
           return;
         }
 
         const body = await handleCommand(command);
-        postAgentEvent({
-          kind: 'peer_command_result',
-          requestId: command.requestId,
-          type: command.type,
-          ok: body?.ok !== false,
-          message: body?.message || '',
-          error: body?.error || '',
-          bridge: body?.bridge || '',
-        }).catch(() => {});
-        console.log('[daemon-agent] command processed', {
-          requestId: command.requestId,
-          type: command.type,
-          body,
-        });
-        console.log(
-          `[daemon-agent] command summary requestId=${command.requestId || 'n/a'} type=${command.type || 'unknown'} ok=${body?.ok !== false} ` +
-          `message=${body?.message || ''} error=${body?.error || ''} bridge=${body?.bridge || ''}`
-        );
-        await p2pClient.sendPeerMessage(
-          e.origin,
-          {
-            type: 'command_result',
+        if (normalizedType !== 'mouse_move') {
+          postAgentEvent({
+            kind: 'peer_command_result',
             requestId: command.requestId,
-            ok: body.ok !== false,
-            result: body,
-          },
-          { label: 'command_result' }
-        );
+            type: command.type,
+            ok: body?.ok !== false,
+            message: body?.message || '',
+            error: body?.error || '',
+            bridge: body?.bridge || '',
+          }).catch(() => {});
+          console.debug('[daemon-agent] command processed', {
+            requestId: command.requestId,
+            type: command.type,
+            body,
+          });
+          console.debug(
+            `[daemon-agent] command summary requestId=${command.requestId || 'n/a'} type=${command.type || 'unknown'} ok=${body?.ok !== false} ` +
+            `message=${body?.message || ''} error=${body?.error || ''} bridge=${body?.bridge || ''}`
+          );
+        }
+        if (normalizedType !== 'mouse_move') {
+          await sendPeerMessageWithMetrics(
+            incomingOrigin,
+            {
+              type: 'command_result',
+              requestId: command.requestId,
+              ok: body.ok !== false,
+              result: body,
+            },
+            { label: 'command_result' }
+          );
+        }
       } catch (error) {
+        console.error('[daemon-agent] message decode/handle failed', {
+          origin: e?.origin || '',
+          rawType: typeof e?.message,
+          isArrayBuffer: e?.message instanceof ArrayBuffer,
+          error: error?.message,
+        });
         appendMessage(`command error: ${error.message}`);
         postAgentEvent({
           kind: 'peer_command_result',
@@ -388,8 +591,8 @@ async function loadRuntimeConfig() {
           error: error.message,
         }).catch(() => {});
         try {
-          await p2pClient.sendPeerMessage(
-            e.origin,
+          await sendPeerMessageWithMetrics(
+            incomingOrigin,
             {
               type: 'command_result',
               ok: false,
@@ -401,44 +604,80 @@ async function loadRuntimeConfig() {
           // Ignore secondary send failures.
         }
       }
-    },
-    onConnected: async ({ daemonId, clientId, signalingServer, allowedRemoteIds }) => {
-      uidInput.disabled = true;
-      console.log('[daemon-agent] connected to signaling server', { daemonId, remoteId: clientId, signalingHost: signalingServer, allowedRemoteIds });
-      appendMessage(`connected to signaling: daemon=${daemonId} client=${clientId}`);
-      setStatus(`Connected as ${daemonId}. Waiting for ${clientId} messages.`);
-      await postAgentEvent({
-        kind: 'status',
-        status: 'connected',
-        state: {
-          daemonId,
-          clientId,
-          signalingServer,
-          allowedRemoteIds,
-        },
-      });
-    },
-    onReconnectNeeded: ({ connectedSession, desired, allowedRemoteIds }) => {
-      console.log('[daemon-agent] ensureConnected detected stale/mismatched session, reconnecting', {
-        connectedSession,
-        desired,
-        allowedRemoteIds,
-      });
-      appendMessage('ensureConnected: stale signaling session detected, reconnecting.');
-    },
-    onRetrySend: ({ label, errorMessage }) => {
-      appendMessage(`[data-channel] retrying ${label} after signaling reconnect: ${errorMessage}`);
-    },
-  });
+  }
 
+  p2pClient.onMessage = (e) => {
+    inboundMessageQueue = inboundMessageQueue
+      .then(() => handleIncomingPeerMessage(e))
+      .catch((error) => {
+        appendMessage(`[queue] unhandled error processing peer message: ${error?.message || error}`);
+      });
+    return inboundMessageQueue;
+  };
+
+  p2pClient.onSignalingConnected = ({ host }) => {
+    const daemonId = uidInput.value.trim();
+    const clientId = remoteInput.value.trim();
+    const signalingServer = String(host || hostInput.value || '').trim();
+    const allowedRemoteIds = p2pClient.getAllowedRemoteIds();
+    uidInput.disabled = true;
+    console.log('[daemon-agent] connected to signaling server', { daemonId, remoteId: clientId, signalingHost: signalingServer, allowedRemoteIds });
+    appendMessage(`connected to signaling: daemon=${daemonId} client=${clientId}`);
+    setStatus(`Connected as ${daemonId}. Waiting for ${clientId} messages.`);
+    postAgentEvent({
+      kind: 'status',
+      status: 'connected',
+      state: {
+        daemonId,
+        clientId,
+        signalingServer,
+        allowedRemoteIds,
+      },
+    }).catch(() => {});
+    startDaemonOnlineAnnouncements();
+  };
+
+  p2pClient.onReconnectAttempt = ({ connectedSession, desired, allowedRemoteIds }) => {
+    console.debug('[daemon-agent] ensureConnected detected stale/mismatched session, reconnecting', {
+      connectedSession,
+      desired,
+      allowedRemoteIds,
+    });
+    appendMessage('ensureConnected: stale signaling session detected, reconnecting.');
+  };
+
+  p2pClient.onRetrySend = ({ label, errorMessage }) => {
+    appendMessage(`[data-channel] retrying ${label} after signaling reconnect: ${errorMessage}`);
+  };
+
+
+  function handleTerminationMessage(type, payload) {
+    const clientId = payload?.clientId || 'unknown';
+    const reason = payload?.reason || 'unspecified';
+    const isTimeout = type === 'timeout';
+    const message = isTimeout 
+      ? `${type} from client ${clientId} (${reason})`
+      : `${type} received from client ${clientId} (${reason})`;
+    
+    appendMessage(message);
+    console.info('[daemon-agent] ' + message);
+    console.info(`[daemon-agent] initiating disconnect after ${type} message`);
+    
+    disconnect()
+      .then(() => console.debug(`[daemon-agent] disconnect completed after ${type} message`))
+      .catch(err => console.debug(`[daemon-agent] disconnect failed on ${type}`, { error: err?.message }));
+    
+    return { ok: true, message: `${type} received` };
+  }
 
   async function handleCommand(command) {
     const { type, payload = {} } = command;
-    console.log('[daemon-agent] handleCommand received', {
-      type,
-      payload,
-      requestId: command?.requestId,
-    });
+    if (type !== 'mouse_move') {
+      console.debug('[daemon-agent] handleCommand received', {
+        type,
+        requestId: command?.requestId,
+      });
+    }
 
     switch (type) {
       case 'open_url':
@@ -452,16 +691,14 @@ async function loadRuntimeConfig() {
       case 'extension_ping':
       case 'leave':
       case 'finish':
-        if (type !== 'open_url' && type !== 'close_page' && type !== 'extension_ping') {
-          console.debug(`[daemon-agent] handleCommand ${type}`, { payload });
+      case 'timeout':
+        if (type !== 'open_url' && type !== 'close_page' && type !== 'extension_ping' && type !== 'mouse_move') {
+          console.debug(`[daemon-agent] handleCommand ${type}`, {
+            requestId: command?.requestId,
+          });
         }
-        if (type === 'leave') {
-          appendMessage(`leave received from client ${payload?.clientId || 'unknown'} (${payload?.reason || 'unspecified'})`);
-          return { ok: true, message: 'leave received' };
-        }
-        if (type === 'finish') {
-          appendMessage(`finish received from client ${payload?.clientId || 'unknown'} (${payload?.reason || 'unspecified'})`);
-          return { ok: true, message: 'finish received' };
+        if (type === 'leave' || type === 'finish' || type === 'timeout') {
+          return handleTerminationMessage(type, payload);
         }
         try {
           return await forwardCommandViaPuppeteer(command);
@@ -486,7 +723,16 @@ async function loadRuntimeConfig() {
     appendMessage(`connect requested: daemon=${daemonId} client=${remoteId} signaling=${signalingHost}`);
     console.log('[daemon-agent] connect requested', { daemonId, remoteId, signalingHost });
 
-    return p2pClient.connect();
+    return p2pClient.connect({
+      signalingHost,
+      clientId: daemonId,
+      daemonId: remoteId,
+      stunUrls: stunUrlsInput?.value || '',
+      turnUrls: turnUrlsInput?.value || '',
+      turnUsername: turnUsernameInput?.value || '',
+      turnCredential: turnCredentialInput?.value || '',
+      forceReconnect: true,
+    });
   }
 
   async function ensureConnected() {
@@ -545,7 +791,11 @@ async function loadRuntimeConfig() {
           controlTargetMode,
         });
         mediaStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { displaySurface: 'browser' },
+          video: {
+            displaySurface: 'browser',
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
           audio: false,
         });
       }
@@ -572,6 +822,17 @@ async function loadRuntimeConfig() {
       setStatus(
         `Share warning: selected stream looks like "${sharedTrackLabel}" but controlled tab is ${expectedTarget}`
       );
+    }
+
+    const capturedVideoTrack = mediaStream.getVideoTracks()[0];
+    if (capturedVideoTrack && 'contentHint' in capturedVideoTrack) {
+      // Chrome's WebRTC encoder can persistently downscale the captured resolution under
+      // its default CPU/bandwidth adaptation heuristics, which are tuned for motion video
+      // (prioritizing frame rate). This was observed to lock the published stream at a much
+      // lower resolution (e.g. ~800x392) regardless of the real page/window size. Setting
+      // contentHint to 'detail' tells the encoder to prioritize resolution/sharpness instead,
+      // which is the correct behavior for screen-sharing text/UI content.
+      capturedVideoTrack.contentHint = 'detail';
     }
 
     screenStream = new Owt.Base.LocalStream(
@@ -638,23 +899,45 @@ async function loadRuntimeConfig() {
   }
 
   async function disconnect() {
+    console.log('[daemon-agent] disconnect() starting');
+    stopDaemonOnlineAnnouncements();
+    resolveSeen = false;
+    
+    // Stop polling agent commands first
+    pollingAgentCommands = false;
+    console.log('[daemon-agent] polling stopped');
+    
     if (screenStream?.mediaStream) {
       try {
+        console.log('[daemon-agent] stopping screen stream tracks');
         screenStream.mediaStream.getTracks().forEach((track) => track.stop());
-      } catch {
-        // Ignore track stop errors during cleanup.
+      } catch (err) {
+        console.log('[daemon-agent] error stopping tracks', { error: err?.message });
       }
       screenStream = null;
     }
 
+    console.log('[daemon-agent] disconnecting from P2P');
     await p2pClient.disconnect();
+    console.log('[daemon-agent] P2P disconnected');
+    
+    // Reset UI state
     uidInput.disabled = false;
+    uidInput.placeholder = 'Enter daemon ID';
+    remoteInput.disabled = false;
+    remoteInput.placeholder = 'Enter client ID';
     controlTargetMode = null;
+    
     setStatus('Disconnected.');
+    console.log('[daemon-agent] UI reset to disconnected state');
+    
+    appendMessage('--- Disconnected (leave/finish/timeout) ---');
+    
     await postAgentEvent({
       kind: 'status',
       status: 'disconnected',
     });
+    console.log('[daemon-agent] disconnect() completed');
   }
 
   async function executeAgentCommand(command) {
@@ -731,12 +1014,15 @@ async function loadRuntimeConfig() {
         });
         appendMessage(`CONNECT_ONLY_RECEIVED daemon=${uidInput.value.trim()} client=${remoteInput.value.trim()} signaling=${hostInput.value.trim()}`);
 
-        if (payload.forceReconnect) {
-          appendMessage('CONNECT_ONLY forceReconnect requested: resetting existing signaling/share state first.');
-          await disconnect();
-        }
+        resolveSeen = false;
 
-        await ensureConnected();
+        // Re-establish signaling/P2P deterministically for connect_only,
+        // matching the manual disconnect+connect flow that is stable.
+        await connect();
+
+        // In CLI-driven connect_only flow, explicitly restart daemon_online announcements
+        // so the mobile side can discover daemon readiness even after reconnect/session changes.
+       // startDaemonOnlineAnnouncements();
 
         console.log('CONNECT_ONLY_CONNECTED', {
           daemonId: uidInput.value.trim(),
@@ -751,6 +1037,37 @@ async function loadRuntimeConfig() {
       case 'disconnect': {
         await disconnect();
         return { ok: true, message: 'disconnected' };
+      }
+      case 'send_peer_notice': {
+        if (typeof payload.clientId === 'string' && payload.clientId.trim()) {
+          remoteInput.value = payload.clientId.trim();
+        }
+
+        await ensureConnected();
+
+        const targetId = String(payload.targetId || remoteInput.value || '').trim();
+        if (!targetId) {
+          return { ok: false, error: 'target client id is required for send_peer_notice' };
+        }
+
+        const noticeType = String(payload.type || 'notice').trim();
+        const requestId = String(payload.requestId || `${noticeType}-${Date.now()}`).trim();
+        const message = String(payload.message || '').trim();
+        const noticePayload = payload.payload && typeof payload.payload === 'object' ? payload.payload : {};
+
+        await sendPeerMessageWithMetrics(
+          targetId,
+          {
+            type: noticeType,
+            requestId,
+            message,
+            payload: noticePayload,
+          },
+          { label: `peer_notice:${noticeType}` }
+        );
+
+        appendMessage(`peer notice sent to ${targetId}: ${noticeType} (${requestId})`);
+        return { ok: true, message: `peer notice sent: ${noticeType}`, bridge: 'p2p' };
       }
       default:
         return { ok: false, error: `Unsupported agent command: ${type}` };

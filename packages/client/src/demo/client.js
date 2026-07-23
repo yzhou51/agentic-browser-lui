@@ -1,5 +1,6 @@
 import {
   AgenticBrowserClient,
+  createPeerIds,
   createViewerMouseCommandSender,
   loadClientRuntimeConfig,
   summarizeIceConfigForLog,
@@ -23,6 +24,7 @@ async function init() {
     turnUsername: document.getElementById('turnUsername'),
     turnCredential: document.getElementById('turnCredential'),
     status: document.getElementById('status'),
+    terminalNotice: document.getElementById('terminalNotice'),
     connectBtn: document.getElementById('connectBtn'),
     disconnectBtn: document.getElementById('disconnectBtn'),
     finishBtn: document.getElementById('finishBtn'),
@@ -35,9 +37,16 @@ async function init() {
     logs: document.getElementById('logs'),
   };
 
-  const envSignalingServer = runtimeConfig.signalingServer || import.meta.env?.SIGNALING_SERVER || window.location.origin;
-  const envClientId = runtimeConfig.clientId || import.meta.env?.CLIENT_ID;
-  const envDaemonId = runtimeConfig.daemonId || import.meta.env?.DAEMON_ID;
+  const envSignalingServer = runtimeConfig.signalingServer || import.meta.env?.SIGNALING_SERVER || 'http://localhost:8095';
+  console.log('[client] Resolved signaling server to:', envSignalingServer, '(from config:', runtimeConfig.signalingServer, ')');
+  if (!runtimeConfig.signalingServer && !import.meta.env?.SIGNALING_SERVER) {
+    console.warn('[client] Using default signaling server. Consider setting SIGNALING_SERVER env var or /client-demo.runtime.json');
+  }
+  const searchParams = new URLSearchParams(window.location.search);
+  const sessionId = String(searchParams.get('sessionId') || runtimeConfig.sessionId || import.meta.env?.SESSION_ID || '').trim();
+  const derivedPeerIds = sessionId ? createPeerIds(sessionId) : null;
+  const envClientId = String(searchParams.get('clientId') || derivedPeerIds?.clientId || runtimeConfig.clientId || import.meta.env?.CLIENT_ID || '').trim();
+  const envDaemonId = String(searchParams.get('remoteId') || derivedPeerIds?.daemonId || runtimeConfig.daemonId || import.meta.env?.DAEMON_ID || '').trim();
   const runtimeStunUrls = runtimeConfig.stunUrls ?? runtimeConfig.stuneUrls;
   const runtimeTurnUrls = runtimeConfig.turnUrls;
   const runtimeTurnUsername = runtimeConfig.turnUsername;
@@ -93,7 +102,7 @@ async function init() {
     return String(el.remoteId?.value || '').trim();
   }
 
-  function sendLeaveMessage(reason) {
+  async function sendLeaveMessage(reason) {
     if (leaveSent || !connected) {
       return;
     }
@@ -115,9 +124,14 @@ async function init() {
     };
 
     try {
-      void client.sendMessage(leaveMessage, daemonId).catch(() => {});
-    } catch {
-      // Keep close flow best-effort only.
+      console.log('[client] sending leave message', { reason, daemonId });
+      await Promise.race([
+        client.sendMessage(leaveMessage, daemonId),
+        new Promise(resolve => setTimeout(resolve, 500)), // Max wait 500ms
+      ]);
+      console.log('[client] leave message sent', { reason });
+    } catch (error) {
+      console.log('[client] leave message failed', { reason, error: error?.message });
     }
   }
 
@@ -155,6 +169,24 @@ async function init() {
   function setStatus(state, message) {
     el.status.dataset.state = state;
     el.status.textContent = message;
+  }
+
+  function showTerminalNotice(state, message) {
+    if (!el.terminalNotice) {
+      return;
+    }
+
+    const text = String(message || '').trim();
+    if (!text) {
+      el.terminalNotice.hidden = true;
+      el.terminalNotice.textContent = '';
+      el.terminalNotice.dataset.state = 'idle';
+      return;
+    }
+
+    el.terminalNotice.hidden = false;
+    el.terminalNotice.dataset.state = state;
+    el.terminalNotice.textContent = text;
   }
 
   function updateActionRequestView() {
@@ -224,7 +256,19 @@ async function init() {
       console.debug('[client] pointer mapped', mapped);
     },
     onBeforeSend: ({ type, payload }) => {
-      console.log('[client] sendMouseCommand', { type, payload });
+      console.debug('[client] sendMouseCommand', { 
+        type,
+        transmitted: {
+          x: payload.x,
+          y: payload.y,
+          b: payload.b,
+          sx: payload.sx,
+          sy: payload.sy,
+        },
+        clientLocal: {
+          // isDragging, releaseReason kept local, not transmitted
+        },
+      });
     },
     onAfterSend: ({ type, mapped, requestId }) => {
       log(`${type} sent (${requestId}) at (${mapped.x}, ${mapped.y}) in ${mapped.sourceWidth}x${mapped.sourceHeight}.`);
@@ -232,7 +276,7 @@ async function init() {
   });
 
   client.onRemoteStream = (stream) => {
-    console.log('[client] onRemoteStream', {
+      console.debug('[client] onRemoteStream', {
       hasStream: Boolean(stream),
       streamId: stream?.id || stream?.mediaStream?.id || null,
       hasMediaStream: Boolean(stream?.mediaStream),
@@ -265,13 +309,92 @@ async function init() {
     }
   };
 
+  // Resolve message retry tracking
+  const resolveRetryState = {
+    requestId: null,
+    retryCount: 0,
+    maxRetries: 3,
+    retryTimeoutMs: 2000,
+    retryTimer: null,
+  };
+
+  function clearResolveRetryTimer() {
+    if (resolveRetryState.retryTimer) {
+      clearTimeout(resolveRetryState.retryTimer);
+      resolveRetryState.retryTimer = null;
+    }
+  }
+
+  async function sendResolveWithRetry(daemonId, resolveMessage) {
+    resolveRetryState.requestId = resolveMessage.requestId;
+    resolveRetryState.retryCount = 0;
+
+    async function attemptSend() {
+      try {
+        log(`Resolve send attempt ${resolveRetryState.retryCount + 1}/${resolveRetryState.maxRetries + 1} to daemon "${daemonId}"`);
+        await client.sendMessage({
+          type: resolveMessage.type,
+          requestId: resolveMessage.requestId,
+          payload: resolveMessage.payload,
+        });
+
+        // Wait for resolve_ack or timeout
+        resolveRetryState.retryTimer = setTimeout(() => {
+          resolveRetryState.retryTimer = null;
+          if (resolveRetryState.retryCount < resolveRetryState.maxRetries) {
+            resolveRetryState.retryCount++;
+            console.log('[client] resolve_ack timeout, retrying...', {
+              attempt: resolveRetryState.retryCount,
+              maxRetries: resolveRetryState.maxRetries,
+            });
+            attemptSend();
+          } else {
+            setStatus('error', `Resolve failed: no acknowledgment from daemon after ${resolveRetryState.maxRetries + 1} attempts`);
+            log(`Resolve failed: no acknowledgment after ${resolveRetryState.maxRetries + 1} attempts`);
+          }
+        }, resolveRetryState.retryTimeoutMs);
+      } catch (error) {
+        clearResolveRetryTimer();
+        setStatus('error', `Resolve send failed: ${error.message}`);
+        log(`Resolve send failed: ${error.message}`);
+      }
+    }
+
+    await attemptSend();
+  }
+
   client.onMessage = ({ origin, message }) => {
     try {
       const parsed = JSON.parse(message);
+      if (parsed.type === 'resolve_ack') {
+        if (parsed.requestId === resolveRetryState.requestId) {
+          clearResolveRetryTimer();
+          log(`Resolve acknowledged by daemon. Waiting for result...`);
+          console.log('[client] resolve_ack received', { requestId: parsed.requestId });
+        }
+        return;
+      }
       if (parsed.type === 'resolve_result') {
         const ok = parsed.ok !== false;
+        clearResolveRetryTimer();
         setStatus(ok ? 'active' : 'error', ok ? 'Resolve processed. Daemon is starting screen share.' : `Resolve failed: ${parsed.error || 'unknown error'}`);
         log(`Resolve result: ${ok ? 'ok' : 'failed'} ${parsed.error ? `(${parsed.error})` : ''}`);
+        return;
+      }
+      if (parsed.type === 'timeout_notice' || parsed.type === 'finish_ack') {
+        const isFinish = parsed.type === 'finish_ack';
+        const noticeMessage = String(parsed.message || parsed.payload?.message || (isFinish
+          ? 'Session finished by daemon.'
+          : 'Session timed out on daemon.')).trim();
+
+        showTerminalNotice(isFinish ? 'active' : 'error', noticeMessage);
+        setStatus(isFinish ? 'active' : 'error', noticeMessage);
+        log(`${parsed.type} received: ${noticeMessage}`);
+
+        void client.disconnect().catch(() => {});
+        connected = false;
+        leaveSent = false;
+        updateActionRequestView();
         return;
       }
       if (parsed.type === 'command_result') {
@@ -356,12 +479,12 @@ async function init() {
     }
   });
 
-  window.addEventListener('pagehide', () => {
-    sendLeaveMessage('pagehide');
+  window.addEventListener('pagehide', async () => {
+    await sendLeaveMessage('pagehide');
   });
 
-  window.addEventListener('beforeunload', () => {
-    sendLeaveMessage('beforeunload');
+  window.addEventListener('beforeunload', async () => {
+    await sendLeaveMessage('beforeunload');
   });
 
   el.resolveBtn.addEventListener('click', async () => {
@@ -392,13 +515,8 @@ async function init() {
         resolveMessage,
       });
 
-      await client.sendMessage({
-        type: resolveMessage.type,
-        requestId: resolveMessage.requestId,
-        payload: resolveMessage.payload,
-      });
-      setStatus('connecting', `Resolve sent to daemon "${daemonId}". Waiting for response...`);
-      log(`Resolve sent to daemon "${daemonId}".`);
+      await sendResolveWithRetry(daemonId, resolveMessage);
+      setStatus('connecting', `Resolve sent to daemon "${daemonId}". Waiting for acknowledgment...`);
     } catch (error) {
       setStatus('error', `Resolve failed: ${error.message}`);
       log(`Resolve failed: ${error.message}`);
@@ -542,10 +660,6 @@ async function init() {
   });
 
   el.remoteVideo.addEventListener('pointermove', async (event) => {
-    if ((event.timeStamp | 0) % 7 !== 0) {
-      return;
-    }
-
     try {
       await sendMouseCommand('mouse_move', event, {
         isDragging: isMousePressed,

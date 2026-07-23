@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Daemon CLI Agent</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: #0f172a;
+        color: #e5e7eb;
+      }
+      .container {
+        max-width: 960px;
+        margin: 24px auto;
+        padding: 16px;
+      }
+      .card {
+        background: #111827;
+        border: 1px solid #334155;
+        border-radius: 10px;
+        padding: 14px;
+      }
+      .status {
+        color: #22d3ee;
+        margin: 0 0 12px;
+      }
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        background: #020617;
+        border: 1px solid #1e293b;
+        border-radius: 8px;
+        padding: 12px;
+        min-height: 180px;
+      }
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Agentic-Browser Daemon (CLI Mode)</h1>
+      <div class="card">
+        <p id="status" class="status">Starting...</p>
+        <pre id="messages"></pre>
+      </div>
+    </div>
+
+    <div class="hidden" aria-hidden="true">
+      <input id="uid" value="daemon-1" />
+      <input id="remote" value="client-1" />
+      <input id="host" value="http://localhost:8095" />
+      <input id="stunUrls" value="" />
+      <input id="turnUrls" value="" />
+      <input id="turnUsername" value="" />
+      <input id="turnCredential" value="" />
+    </div>
+
+    <script src="./vendor/socket.io.min.js"></script>
+    <script src="./vendor/sc.websocket.js"></script>
+    <script src="./vendor/owt.js"></script>
+    <script type="module" src="./daemon-cli.js"></script>
+  </body>
+</html>
