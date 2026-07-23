@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-import { normalizeRtcIceOptions, parseRtcIceServersJson } from './sdk/rtcConfig.js';
+import { normalizeRtcIceOptions, parseRtcIceServersJson } from './sdk/config/rtcConfig.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

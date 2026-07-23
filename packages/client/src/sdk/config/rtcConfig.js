@@ -165,3 +165,28 @@ export function normalizeRtcIceOptions(input = {}) {
 export function formatIceUrls(value) {
   return normalizeIceUrlList(value).join('\n');
 }
+
+// Build a compact, log-friendly summary of the effective ICE configuration
+// (STUN/TURN URLs + whether TURN credentials are present) without leaking the
+// credential value itself.
+export function summarizeIceConfigForLog(rtcOptions) {
+  const iceServers = Array.isArray(rtcOptions?.rtcIceServers) ? rtcOptions.rtcIceServers : [];
+  const stunUrls = iceServers
+    .flatMap((entry) => (Array.isArray(entry?.urls) ? entry.urls : [entry?.urls]))
+    .filter((url) => /^stuns?:/i.test(String(url || '').trim()));
+  const turnUrls = iceServers
+    .flatMap((entry) => (Array.isArray(entry?.urls) ? entry.urls : [entry?.urls]))
+    .filter((url) => /^turns?:/i.test(String(url || '').trim()));
+  const firstTurnServer = iceServers.find((entry) => {
+    const urls = Array.isArray(entry?.urls) ? entry.urls : [entry?.urls];
+    return urls.some((url) => /^turns?:/i.test(String(url || '').trim()));
+  });
+
+  return {
+    stunUrls,
+    turnUrls,
+    turnUsername: firstTurnServer?.username || '',
+    hasTurnCredential: Boolean(firstTurnServer?.credential),
+    iceServerCount: iceServers.length,
+  };
+}

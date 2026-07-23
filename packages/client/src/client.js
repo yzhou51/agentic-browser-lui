@@ -10,7 +10,7 @@ import {
   readSearchPercentParam,
   summarizeIceConfigForLog,
 } from './sdk/index.js';
-import { normalizeRtcIceOptions, parseRtcIceServersJson } from './sdk/rtcConfig.js';
+import { normalizeRtcIceOptions, parseRtcIceServersJson } from './sdk/config/rtcConfig.js';
 
 async function init() {
   const runtimeConfig = await loadClientRuntimeConfig('/client.runtime.json');
@@ -107,9 +107,9 @@ async function init() {
                           runtimeConfig.signalingServer || 
                           import.meta.env?.SIGNALING_SERVER || 
                           defaultSignalingServer);
-  console.log('[mobile_client] Resolved signaling server to:', envSignalingServer, '(from config:', runtimeConfig.signalingServer, ')');
+  console.log('[client] Resolved signaling server to:', envSignalingServer, '(from config:', runtimeConfig.signalingServer, ')');
   if (!runtimeConfig.signalingServer && !import.meta.env?.SIGNALING_SERVER) {
-    console.warn('[mobile_client] Using default signaling server. Consider setting SIGNALING_SERVER env var or /client.runtime.json');
+    console.warn('[client] Using default signaling server. Consider setting SIGNALING_SERVER env var or /client.runtime.json');
   }
   const sessionId = readSearchParam(searchParams, 'sessionId', runtimeConfig.sessionId || import.meta.env?.SESSION_ID || '');
   const derivedPeerIds = sessionId ? createPeerIds(sessionId) : null;
@@ -189,14 +189,14 @@ async function init() {
     };
 
     try {
-      console.log('[mobile] sending leave message', { reason, daemonId });
+      console.log('[client] sending leave message', { reason, daemonId });
       await Promise.race([
         client.sendMessage(leaveMessage, daemonId),
         new Promise(resolve => setTimeout(resolve, 500)), // Max wait 500ms
       ]);
-      console.log('[mobile] leave message sent', { reason });
+      console.log('[client] leave message sent', { reason });
     } catch (error) {
-      console.log('[mobile] leave message failed', { reason, error: error?.message });
+      console.log('[client] leave message failed', { reason, error: error?.message });
     }
   }
 
@@ -232,7 +232,7 @@ async function init() {
   }
 
   function setStatus(state, message) {
-    console.log(`[mobile_client] status update: state=${state} message=${message}`);
+    console.log(`[client] status update: state=${state} message=${message}`);
   }
 
   function setClientState(stateKey, message) {
@@ -318,7 +318,7 @@ async function init() {
   function startSessionCountdown(timeoutMs) {
     const rawMs = Number(timeoutMs);
     if (!Number.isFinite(rawMs) || rawMs <= 0) {
-      console.debug('[mobile_client] countdown not started: invalid timeoutMs', timeoutMs);
+      console.debug('[client] countdown not started: invalid timeoutMs', timeoutMs);
       return;
     }
 
@@ -375,7 +375,7 @@ async function init() {
       })
       .catch((error) => {
         log(`Resolve send failed: ${error.message}`);
-        console.warn('[mobile_client] Resolve send failed', {
+        console.warn('[client] Resolve send failed', {
           reason,
           attempt: resolveAttempts,
           error: error?.message,
@@ -1349,7 +1349,7 @@ async function init() {
         clearResolveRetryTimer();
         setClientState('daemonConnected', 'Resolve acknowledged by daemon. Waiting for result...');
         log(`Resolve acknowledged by daemon. Waiting for result...`);
-        console.log('[mobile_client] resolve_ack received', { requestId: parsed.requestId });
+        console.log('[client] resolve_ack received', { requestId: parsed.requestId });
         return;
       }
       if (parsed.type === 'resolve_result') {
@@ -2037,7 +2037,7 @@ async function init() {
 
   try {
     const rtcOptions = getRtcConnectOptions();
-    console.log('[mobile-client] p2p connect config', {
+    console.log('[client] p2p connect config', {
       signalingServer: getSignalingUrl(),
       daemonId: getDaemonId(),
       clientId: getClientId(),

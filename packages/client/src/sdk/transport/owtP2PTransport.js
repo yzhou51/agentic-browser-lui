@@ -1,50 +1,10 @@
-export const DIRECT_SIGNALING_TYPES = Object.freeze([
-  'resolve',
-  'resolve_ack',
-  'resolve-act',
-  'resolve_result',
-  'resolve-result',
-  'daemon_online',
-  'daemon-online',
-  'finish',
-  'leave',
-]);
-
-function asTrimmedString(value) {
-  return String(value ?? '').trim();
-}
-
-function parsePotentialJson(value) {
-  if (typeof value !== 'string') {
-    return null;
-  }
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
-export function normalizeIncomingMessageEvent(event) {
-  return {
-    ...event,
-    origin: asTrimmedString(
-      event?.origin ?? event?.from ?? event?.peerId ?? event?.detail?.origin ?? event?.detail?.from
-    ),
-    message: event?.message ?? event?.data ?? event?.detail?.message ?? event?.detail?.data,
-  };
-}
-
-export function resolveMessageType(message) {
-  if (typeof message === 'object' && message !== null) {
-    return asTrimmedString(message.type).toLowerCase();
-  }
-  if (typeof message === 'string') {
-    const parsed = parsePotentialJson(message);
-    return asTrimmedString(parsed?.type).toLowerCase();
-  }
-  return '';
-}
+import {
+  SIGNALING_MESSAGE_TYPES,
+  normalizeIncomingMessageEvent,
+  resolveMessageType,
+  asTrimmedString,
+  parsePotentialJson,
+} from './signalingMessages.js';
 
 export function createOwtP2PTransport({
   windowObject = window,
@@ -57,7 +17,7 @@ export function createOwtP2PTransport({
   onSignalingConnected,
   onP2PClientCreated,
   normalizeDirectSignalingMessage,
-  directSignalingTypes = DIRECT_SIGNALING_TYPES,
+  directSignalingTypes = SIGNALING_MESSAGE_TYPES,
 } = {}) {
   let p2p = null;
   let signaling = null;

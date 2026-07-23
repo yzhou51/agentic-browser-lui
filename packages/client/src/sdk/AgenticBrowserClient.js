@@ -1,40 +1,46 @@
-import { normalizeRtcIceOptions } from './rtcConfig.js';
-import {
-  createOwtP2PTransport,
-  DIRECT_SIGNALING_TYPES,
-  resolveMessageType,
-} from './owtP2PTransportCore.js';
+import { normalizeRtcIceOptions } from './config/rtcConfig.js';
+import { createOwtP2PTransport } from './transport/owtP2PTransport.js';
+import { SIGNALING_MESSAGE_TYPES, resolveMessageType } from './transport/signalingMessages.js';
 
 export class AgenticBrowserClient {
-  constructor() {
-    this.clientId = null;
-    this.daemonId = null;
-    this.onRemoteStream = null;
-    this.onMessage = null;
-    this.onPeerConnected = null;
-    this.onPeerDisconnected = null;
-    this.onDisconnect = null;
-    this.onSignalingConnected = null;
-    this.onReconnectAttempt = null;
-    this.onRetrySend = null;
-    this._requestSeq = 0;
-    this._connectOptions = null;
-    this._connectPromise = null;
-    this._peerConnected = false;
-    this._rtcConfiguration = {};
+  // Session identity + caller-supplied event callbacks (the public event API).
+  clientId = null;
+  daemonId = null;
+  onRemoteStream = null;
+  onMessage = null;
+  onPeerConnected = null;
+  onPeerDisconnected = null;
+  onDisconnect = null;
+  onSignalingConnected = null;
+  onReconnectAttempt = null;
+  onRetrySend = null;
 
-    this.transport = createOwtP2PTransport({
+  // Internal connection state.
+  #requestSeq = 0;
+  #connectOptions = null;
+  #connectPromise = null;
+  #peerConnected = false;
+  #rtcConfiguration = {};
+
+  constructor() {
+    this.transport = createOwtP2PTransport(this.#buildTransportOptions());
+  }
+
+  // Assemble the callbacks/config wiring passed to the OWT transport. Kept in one
+  // place so the constructor stays a thin declaration.
+  #buildTransportOptions() {
+    return {
       windowObject: window,
-      directSignalingTypes: DIRECT_SIGNALING_TYPES,
+      directSignalingTypes: SIGNALING_MESSAGE_TYPES,
       getDesiredSession: () => ({
         localId: String(this.clientId || '').trim(),
         remoteId: String(this.daemonId || '').trim(),
-        signalingServer: String(this._connectOptions?.signalingHost || '').trim(),
-        rtcConfiguration: this._rtcConfiguration,
-        sessionKey: JSON.stringify(this._rtcConfiguration?.iceServers || []),
+        signalingServer: String(this.#connectOptions?.signalingHost || '').trim(),
+        rtcConfiguration: this.#rtcConfiguration,
+        sessionKey: JSON.stringify(this.#rtcConfiguration?.iceServers || []),
       }),
       onMessage: async ({ origin, message }) => {
-        this._emitPeerConnected({
+        this.#emitPeerConnected({
           reason: 'message-received',
           remoteId: String(origin || '').trim(),
         });
@@ -44,8 +50,8 @@ export class AgenticBrowserClient {
       },
       onConnected: async () => {},
       onServerDisconnected: () => {
-        this._emitPeerDisconnected({ reason: 'server-disconnected' });
-        this._connectPromise = null;
+        this.#emitPeerDisconnected({ reason: 'server-disconnected' });
+        this.#connectPromise = null;
         if (this.onDisconnect) {
           this.onDisconnect();
         }
@@ -72,40 +78,43 @@ export class AgenticBrowserClient {
         }
       },
       onP2PClientCreated: ({ p2p }) => {
-        p2p.addEventListener('streamadded', async (event) => {
-          const originalStream = event.stream;
-          let remoteStream = originalStream;
-
-          console.debug('[client-sdk] streamadded received', {
-            daemonId: this.daemonId,
-            hasStream: Boolean(originalStream),
-            streamId: originalStream?.id || originalStream?.mediaStream?.id || null,
-            hasMediaStream: Boolean(originalStream?.mediaStream),
-          });
-
-          try {
-            if (typeof p2p.subscribe === 'function') {
-              const subscription = await p2p.subscribe(event.stream);
-              if (subscription?.stream?.mediaStream) {
-                remoteStream = subscription.stream;
-              }
-            }
-          } catch (error) {
-            console.error('[client-sdk] Failed to subscribe remote stream:', error);
-            remoteStream = originalStream;
-          }
-
-          this._emitPeerConnected({
-            reason: 'stream-added',
-            streamId: remoteStream?.id || remoteStream?.mediaStream?.id || null,
-          });
-
-          if (this.onRemoteStream) {
-            this.onRemoteStream(remoteStream);
-          }
-        });
+        p2p.addEventListener('streamadded', (event) => this.#handleStreamAdded(p2p, event));
       },
+    };
+  }
+
+  // Subscribe to a newly-added remote stream and forward it to onRemoteStream.
+  async #handleStreamAdded(p2p, event) {
+    const originalStream = event.stream;
+    let remoteStream = originalStream;
+
+    console.debug('[client-sdk] streamadded received', {
+      daemonId: this.daemonId,
+      hasStream: Boolean(originalStream),
+      streamId: originalStream?.id || originalStream?.mediaStream?.id || null,
+      hasMediaStream: Boolean(originalStream?.mediaStream),
     });
+
+    try {
+      if (typeof p2p.subscribe === 'function') {
+        const subscription = await p2p.subscribe(event.stream);
+        if (subscription?.stream?.mediaStream) {
+          remoteStream = subscription.stream;
+        }
+      }
+    } catch (error) {
+      console.error('[client-sdk] Failed to subscribe remote stream:', error);
+      remoteStream = originalStream;
+    }
+
+    this.#emitPeerConnected({
+      reason: 'stream-added',
+      streamId: remoteStream?.id || remoteStream?.mediaStream?.id || null,
+    });
+
+    if (this.onRemoteStream) {
+      this.onRemoteStream(remoteStream);
+    }
   }
 
   get p2p() {
@@ -116,11 +125,11 @@ export class AgenticBrowserClient {
     return this.transport.getSignaling();
   }
 
-  _emitPeerConnected(details = {}) {
-    if (this._peerConnected) {
+  #emitPeerConnected(details = {}) {
+    if (this.#peerConnected) {
       return;
     }
-    this._peerConnected = true;
+    this.#peerConnected = true;
     if (this.onPeerConnected) {
       this.onPeerConnected({
         daemonId: this.daemonId,
@@ -129,11 +138,11 @@ export class AgenticBrowserClient {
     }
   }
 
-  _emitPeerDisconnected(details = {}) {
-    if (!this._peerConnected) {
+  #emitPeerDisconnected(details = {}) {
+    if (!this.#peerConnected) {
       return;
     }
-    this._peerConnected = false;
+    this.#peerConnected = false;
     if (this.onPeerDisconnected) {
       this.onPeerDisconnected({
         daemonId: this.daemonId,
@@ -152,20 +161,20 @@ export class AgenticBrowserClient {
       ...rtcOptions,
     };
 
-    this._connectOptions = nextOptions;
+    this.#connectOptions = nextOptions;
     this.clientId = nextOptions.clientId;
     this.daemonId = nextOptions.daemonId;
-    this._rtcConfiguration = nextOptions.rtcConfiguration || {};
+    this.#rtcConfiguration = nextOptions.rtcConfiguration || {};
 
-    if (this._connectPromise) {
-      return this._connectPromise;
+    if (this.#connectPromise) {
+      return this.#connectPromise;
     }
 
     if (nextOptions.forceReconnect) {
       await this.disconnect();
     }
 
-    this._connectPromise = (async () => {
+    this.#connectPromise = (async () => {
       const p2p = await this.transport.connect();
       p2p.allowedRemoteIds = this.daemonId ? [this.daemonId] : [];
 
@@ -181,9 +190,9 @@ export class AgenticBrowserClient {
     })();
 
     try {
-      return await this._connectPromise;
+      return await this.#connectPromise;
     } finally {
-      this._connectPromise = null;
+      this.#connectPromise = null;
     }
   }
 
@@ -194,9 +203,9 @@ export class AgenticBrowserClient {
   }
 
   async disconnect() {
-    this._emitPeerDisconnected({ reason: 'manual-disconnect' });
+    this.#emitPeerDisconnected({ reason: 'manual-disconnect' });
     await this.transport.disconnect();
-    this._connectPromise = null;
+    this.#connectPromise = null;
   }
 
   async ensureConnected() {
@@ -204,33 +213,55 @@ export class AgenticBrowserClient {
       return this.clientId;
     }
 
-    if (this._connectPromise) {
-      return this._connectPromise;
+    if (this.#connectPromise) {
+      return this.#connectPromise;
     }
 
-    if (!this._connectOptions) {
+    if (!this.#connectOptions) {
       throw new Error('Not connected.');
     }
 
-    return this.connect(this._connectOptions);
+    return this.connect(this.#connectOptions);
   }
 
   async reconnect() {
-    if (!this._connectOptions) {
+    if (!this.#connectOptions) {
       throw new Error('Not connected.');
     }
 
     return this.connect({
-      ...this._connectOptions,
+      ...this.#connectOptions,
       forceReconnect: true,
     });
   }
 
   async sendCommand(type, payload = {}) {
-    const requestId = `cmd-${Date.now()}-${++this._requestSeq}`;
+    const requestId = `cmd-${Date.now()}-${++this.#requestSeq}`;
     const command = { type, payload, requestId };
     await this.sendMessage(command);
     return requestId;
+  }
+
+  // Wrap an outgoing message for transport. ArrayBuffer payloads (binary mouse
+  // commands) are base64-encoded and flagged so the daemon can decode them.
+  #serializeOutgoingMessage(message) {
+    const isBinaryPayload =
+      typeof message === 'object' &&
+      message !== null &&
+      !Array.isArray(message) &&
+      message.payload instanceof ArrayBuffer;
+
+    if (!isBinaryPayload) {
+      return message;
+    }
+
+    const binaryData = new Uint8Array(message.payload);
+    const base64Data = btoa(String.fromCharCode(...binaryData));
+    return {
+      ...message,
+      payload: base64Data,
+      __isBinary: true,
+    };
   }
 
   async sendMessage(message, targetId) {
@@ -239,22 +270,7 @@ export class AgenticBrowserClient {
       throw new Error('Target daemon id is required before sending messages.');
     }
 
-    let serializedMessage = message;
-    if (
-      typeof message === 'object' &&
-      message !== null &&
-      !Array.isArray(message) &&
-      message.payload instanceof ArrayBuffer
-    ) {
-      const binaryData = new Uint8Array(message.payload);
-      const base64Data = btoa(String.fromCharCode(...binaryData));
-      serializedMessage = {
-        ...message,
-        payload: base64Data,
-        __isBinary: true,
-      };
-    }
-
+    const serializedMessage = this.#serializeOutgoingMessage(message);
     const parsedType = resolveMessageType(serializedMessage);
     try {
       await this.transport.sendMessage(resolvedTarget, serializedMessage, {
@@ -264,7 +280,7 @@ export class AgenticBrowserClient {
     } catch (error) {
       const messageText = String(error?.message || '');
       if (messageText.includes('not connected to signaling channel')) {
-        this._connectPromise = null;
+        this.#connectPromise = null;
       }
       throw error;
     }

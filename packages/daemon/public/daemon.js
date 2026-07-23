@@ -1,7 +1,7 @@
 /* global Owt */
 
 import { AgenticBrowserClient } from '/client-sdk/AgenticBrowserClient.js';
-import { decodeMouseCommandBinary } from '/client-sdk/mouseCommandBinary.js';
+import { decodeMouseCommand } from '/client-sdk/input/mouseCommandCodec.js';
 
 async function loadRuntimeConfig() {
   try {
@@ -335,7 +335,7 @@ async function loadRuntimeConfig() {
       if (ArrayBuffer.isView(rawMessage)) {
         const view = rawMessage;
         const sliced = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
-        const decoded = decodeMouseCommandBinary(sliced);
+        const decoded = decodeMouseCommand(sliced);
         if (!decoded) {
           throw new Error('Failed to decode binary message from typed array');
         }
@@ -353,7 +353,7 @@ async function loadRuntimeConfig() {
         for (let index = 0; index < binaryString.length; index += 1) {
           bytes[index] = binaryString.charCodeAt(index);
         }
-        const decoded = decodeMouseCommandBinary(bytes.buffer);
+        const decoded = decodeMouseCommand(bytes.buffer);
         if (!decoded) {
           throw new Error('Failed to decode binary message');
         }
@@ -364,7 +364,7 @@ async function loadRuntimeConfig() {
     }
 
     if (rawMessage instanceof ArrayBuffer) {
-      const decoded = decodeMouseCommandBinary(rawMessage);
+      const decoded = decodeMouseCommand(rawMessage);
       if (!decoded) {
         throw new Error('Failed to decode binary message');
       }

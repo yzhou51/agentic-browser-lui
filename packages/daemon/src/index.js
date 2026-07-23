@@ -10,7 +10,7 @@ import { CommandProcessor } from './daemon/commandProcessor.js';
 import { createToolModeRuntime, PutterMode, RemoteDevtoolsMode } from './daemon/toolMode.js';
 import { createLogger } from './logger.js';
 import { startStaticServer } from './server.js';
-import { createPeerIds } from '../../client/src/sdk/peerIds.js';
+import { createPeerIds } from '../../client/src/sdk/config/peerIds.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

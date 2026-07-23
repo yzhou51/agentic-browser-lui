@@ -1,9 +1,9 @@
 import { createLogger } from '../logger.js';
 
 import {
-  decodeMouseCommandBinary,
-  normalizePayload,
-} from '../../../client/src/sdk/mouseCommandBinary.js';
+  decodeMouseCommand,
+  normalizeMouseCommandPayload,
+} from '../../../client/src/sdk/input/mouseCommandCodec.js';
 
 const logger = createLogger('command-processor');
 
@@ -49,7 +49,7 @@ export class CommandProcessor {
     let { type, payload = {} } = command;
     
     // Normalize payload: decode binary if needed, fall back to JSON
-    payload = normalizePayload(payload, type) || {};
+    payload = normalizeMouseCommandPayload(payload) || {};
 
     logger.debug('[daemon] command received', {
       type,

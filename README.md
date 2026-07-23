@@ -289,10 +289,6 @@ sequenceDiagram
     end
 ```
 
-## Refactoring Notes
-
-- Client-side viewer geometry and mouse-command helpers were moved from the demo into `packages/client/src/sdk/viewerUtils.js` and re-exported by `packages/client/src/sdk/index.js`.
-
 ## Notes
 
 - Signaling logic in daemon peer page and client follows `peercall.js`/`sc.websocket.js` pattern (`authentication`, `owt-message`, reconnect handling).
