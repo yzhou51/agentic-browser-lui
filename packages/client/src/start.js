@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-import { normalizeRtcIceOptions, parseRtcIceServersJson } from './sdk/rtcConfig.js';
+import { writeClientRuntimeConfig } from './runtimeConfig.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,57 +14,14 @@ dotenv.config({ path: path.resolve(rootDir, '.env') });
 
 const staticHost = process.env.CLIENT_STATIC_HOST || '0.0.0.0';
 const staticPort = Number(process.env.CLIENT_STATIC_PORT || 5174);
-const signalingServer = process.env.SIGNALING_SERVER || 'http://localhost:8095';
-const clientId = process.env.CLIENT_ID || 'client-1';
-const daemonId = process.env.DAEMON_ID || 'daemon-1';
-const headless = String(process.env.BROWSER_HEADLESS || 'false').toLowerCase() === 'true';
-
-const parsedRtcIceServers = parseRtcIceServersJson(process.env.RTC_ICE_SERVERS_JSON);
-if (String(process.env.RTC_ICE_SERVERS_JSON || '').trim() && !parsedRtcIceServers.length) {
-  console.warn('Ignoring invalid RTC_ICE_SERVERS_JSON in client .env.');
-}
-
-const hasExplicitIceEnv = [
-  process.env.STUN_SERVER_URLS,
-  process.env.TURN_SERVER_URLS,
-  process.env.TURN_USERNAME,
-  process.env.TURN_CREDENTIAL,
-].some((value) => String(value || '').trim());
-
-const runtimeIceConfig = normalizeRtcIceOptions(
-  hasExplicitIceEnv
-    ? {
-        stunUrls: process.env.STUN_SERVER_URLS,
-        turnUrls: process.env.TURN_SERVER_URLS,
-        turnUsername: process.env.TURN_USERNAME,
-        turnCredential: process.env.TURN_CREDENTIAL,
-      }
-    : {
-        rtcIceServers: parsedRtcIceServers,
-      }
-);
-
 const publicHost = staticHost === '0.0.0.0' ? os.hostname() : staticHost;
 
-const runtimeConfigPath = path.resolve(rootDir, 'client-demo.runtime.json');
-fs.writeFileSync(
-  runtimeConfigPath,
-  JSON.stringify(
-    {
-      signalingServer,
-      clientId,
-      daemonId,
-      headless,
-      stunUrls: runtimeIceConfig.stunUrls,
-      turnUrls: runtimeIceConfig.turnUrls,
-      turnUsername: runtimeIceConfig.turnUsername,
-      turnCredential: runtimeIceConfig.turnCredential,
-      rtcIceServers: runtimeIceConfig.rtcIceServers,
-    },
-    null,
-    2
-  ) + '\n',
-  'utf8'
+// Generate the config the client fetches at /client.runtime.json. This uses the
+// same generator the Vite dev/preview server uses (src/runtimeConfig.js), so
+// `pnpm start` and `pnpm dev` derive their config from one source: .env + that module.
+const runtimeConfig = writeClientRuntimeConfig();
+console.log(
+  `Client runtime config: signaling=${runtimeConfig.signalingServer}, clientId=${runtimeConfig.clientId}, daemonId=${runtimeConfig.daemonId}`
 );
 
 const MIME_TYPES = {
@@ -82,11 +39,11 @@ const MIME_TYPES = {
 
 function resolveSafePath(reqPath) {
   const rawPath = decodeURIComponent(reqPath.split('?')[0]);
-  const normalized = rawPath === '/' ? '/mobile_client.html' : rawPath;
+  const normalized = rawPath === '/' ? '/client.html' : rawPath;
   const relative = normalized.replace(/^\/+/, '');
   const isPublicAsset =
     relative.startsWith('vendor/') ||
-    relative === 'mobile_client.html';
+    relative === 'client.html';
   const baseDir = isPublicAsset ? path.resolve(rootDir, 'public') : rootDir;
   const candidate = path.resolve(baseDir, relative);
   if (!candidate.startsWith(path.resolve(baseDir))) {
@@ -147,7 +104,7 @@ server.on('error', (error) => {
 
 server.listen(staticPort, staticHost, () => {
   console.log(`Client static server running: http://${staticHost}:${staticPort}`);
-  console.log(`Open demo page: http://${publicHost}:${staticPort}/mobile_client.html`);
+  console.log(`Open demo page: http://${publicHost}:${staticPort}/client.html`);
 });
 
 let shuttingDown = false;

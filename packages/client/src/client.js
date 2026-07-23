@@ -9,11 +9,11 @@ import {
   readSearchParamAny,
   readSearchPercentParam,
   summarizeIceConfigForLog,
-} from '../sdk/index.js';
-import { normalizeRtcIceOptions, parseRtcIceServersJson } from '../sdk/rtcConfig.js';
+} from './sdk/index.js';
+import { normalizeRtcIceOptions, parseRtcIceServersJson } from './sdk/rtcConfig.js';
 
 async function init() {
-  const runtimeConfig = await loadClientRuntimeConfig('/client-demo.runtime.json');
+  const runtimeConfig = await loadClientRuntimeConfig('/client.runtime.json');
   const searchParams = new URLSearchParams(window.location.search);
   const client = new AgenticBrowserClient();
   let connected = false;
@@ -109,7 +109,7 @@ async function init() {
                           defaultSignalingServer);
   console.log('[mobile_client] Resolved signaling server to:', envSignalingServer, '(from config:', runtimeConfig.signalingServer, ')');
   if (!runtimeConfig.signalingServer && !import.meta.env?.SIGNALING_SERVER) {
-    console.warn('[mobile_client] Using default signaling server. Consider setting SIGNALING_SERVER env var or /client-demo.runtime.json');
+    console.warn('[mobile_client] Using default signaling server. Consider setting SIGNALING_SERVER env var or /client.runtime.json');
   }
   const sessionId = readSearchParam(searchParams, 'sessionId', runtimeConfig.sessionId || import.meta.env?.SESSION_ID || '');
   const derivedPeerIds = sessionId ? createPeerIds(sessionId) : null;

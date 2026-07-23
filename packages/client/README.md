@@ -4,7 +4,7 @@ Client subproject includes:
 
 - SDK: `src/sdk/AgenticBrowserClient.js`
 - Viewer helpers: `src/sdk/viewerUtils.js`
-- Demo UI: `public/mobile_client.html`, with logic in `src/demo/mobile_client.js`
+- Demo UI: `public/client.html`, with logic in `src/client.js`
 
 ## Dev
 
@@ -21,12 +21,12 @@ From workspace root, equivalent command is `pnpm dev:client`.
 
 From workspace root, equivalent command is `pnpm start:client`.
 
-This starts a local static server for this package and prints an `http://.../mobile_client.html` URL.
-Runtime defaults are generated from `.env` into `client-demo.runtime.json`.
+This starts a local static server for this package and prints an `http://.../client.html` URL.
+Runtime defaults are generated from `.env` into `client.runtime.json`.
 
 Pages:
 
-- `public/mobile_client.html`: mobile-first client page with dedicated keyboard-launch button and a Finish action pinned at the opposite bottom corner.
+- `public/client.html`: mobile-first client page with dedicated keyboard-launch button and a Finish action pinned at the opposite bottom corner.
 
 Default static server listen host is `0.0.0.0`, default port is `5174`.
 
@@ -81,9 +81,9 @@ These helpers were extracted from the demo so other client UIs can reuse the sam
 
 ## Demo behavior
 
-- `src/demo/mobile_client.js` consumes the shared SDK viewer helpers instead of owning duplicate geometry logic.
+- `src/demo/client.js` consumes the shared SDK viewer helpers instead of owning duplicate geometry logic.
 - Drag interactions are sent as `mouse_down`, `mouse_move`, and `mouse_up` commands so the daemon can replay press-and-drag flows on the shared page.
 - Static mode serves vendored browser dependencies locally, including `public/vendor/socket.io.min.js`, to avoid CDN dependencies during signaling setup.
-- The mobile page (`src/demo/mobile_client.js`) adds an explicit `Open Keyboard` button for phone text input and a `Finish` action.
-- STUN/TURN fields default from `.env` and can be generated into `client-demo.runtime.json`.
-- Mobile status chip in `public/mobile_client.html` is hidden by default for customer-facing demos and can be re-enabled for debugging by adding `debug-status` class to `body`.
+- The mobile page (`src/demo/client.js`) adds an explicit `Open Keyboard` button for phone text input and a `Finish` action.
+- STUN/TURN fields default from `.env` and can be generated into `client.runtime.json`.
+- Mobile status chip in `public/client.html` is hidden by default for customer-facing demos and can be re-enabled for debugging by adding `debug-status` class to `body`.
