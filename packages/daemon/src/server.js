@@ -34,7 +34,7 @@ function resolveSafePath(rootDir, browserModuleDir, clientSdkDir, reqPath) {
     return candidate;
   }
 
-  const normalized = rawPath === '/' ? '/daemon-agent.html' : rawPath;
+  const normalized = rawPath === '/' ? '/daemon.html' : rawPath;
   const relative = normalized.replace(/^\/+/, '');
   const candidate = path.resolve(rootDir, relative);
   if (!candidate.startsWith(path.resolve(rootDir))) {
@@ -185,7 +185,7 @@ export function startStaticServer({
   clientSdkDir,
   host,
   port,
-  getDaemonAgentConfig,
+  getDaemonConfig,
   submitCommand,
   getDaemonState,
   getSharePreflight,
@@ -205,7 +205,7 @@ export function startStaticServer({
     if (typeof bootstrapAgentBridge !== 'function') {
       return {
         ok: false,
-        error: 'daemon-agent page is offline and auto-bootstrap is not configured.',
+        error: 'daemon page is offline and auto-bootstrap is not configured.',
       };
     }
 
@@ -214,7 +214,7 @@ export function startStaticServer({
     } catch (error) {
       return {
         ok: false,
-        error: `Failed to bootstrap daemon-agent page: ${error.message}`,
+        error: `Failed to bootstrap daemon page: ${error.message}`,
       };
     }
 
@@ -228,7 +228,7 @@ export function startStaticServer({
 
     return {
       ok: false,
-      error: 'daemon-agent bridge did not come online in time. Check daemon Chrome window and daemon-agent page state.',
+      error: 'daemon bridge did not come online in time. Check daemon Chrome window and daemon page state.',
     };
   }
 
@@ -246,12 +246,12 @@ export function startStaticServer({
       return;
     }
 
-    if (req.url === '/daemon-agent.config.json') {
-      writeJson(res, 200, getDaemonAgentConfig());
+    if (req.url === '/daemon.config.json') {
+      writeJson(res, 200, getDaemonConfig());
       return;
     }
 
-    if (req.url === '/daemon-agent.command') {
+    if (req.url === '/daemon.command') {
       if (req.method !== 'POST') {
         res.writeHead(405, {
           'Content-Type': 'application/json; charset=utf-8',
@@ -367,7 +367,7 @@ export function startStaticServer({
           writeJson(res, 200, {
             ok: true,
             result,
-            message: 'Chrome launched. daemon-agent page can be auto-bootstrapped by action/share APIs when needed.',
+            message: 'Chrome launched. daemon page can be auto-bootstrapped by action/share APIs when needed.',
           });
         })
         .catch((error) => {
@@ -417,7 +417,7 @@ export function startStaticServer({
           }
 
           if (String(payload.name || '').trim() === 'agent-target') {
-            const agentConfig = typeof getDaemonAgentConfig === 'function' ? getDaemonAgentConfig() : {};
+            const agentConfig = typeof getDaemonConfig === 'function' ? getDaemonConfig() : {};
             const sessionConfig = withIceDefaults(payload, agentConfig);
 
             enqueueAgentCommand('set_session', {
@@ -431,26 +431,26 @@ export function startStaticServer({
             });
 
             const openHost = host === '0.0.0.0' || host === '::' ? 'localhost' : host;
-            const daemonAgentUrl = new URL(`http://${openHost}:${port}/daemon-agent.html`);
-            daemonAgentUrl.searchParams.set('uid', sessionConfig.daemonId);
-            daemonAgentUrl.searchParams.set('remote', sessionConfig.clientId);
-            daemonAgentUrl.searchParams.set('host', sessionConfig.signalingServer);
+            const daemonUrl = new URL(`http://${openHost}:${port}/daemon.html`);
+            daemonUrl.searchParams.set('uid', sessionConfig.daemonId);
+            daemonUrl.searchParams.set('remote', sessionConfig.clientId);
+            daemonUrl.searchParams.set('host', sessionConfig.signalingServer);
             if (sessionConfig.stunUrls.length) {
-              daemonAgentUrl.searchParams.set('stunUrls', sessionConfig.stunUrls.join(','));
+              daemonUrl.searchParams.set('stunUrls', sessionConfig.stunUrls.join(','));
             }
             if (sessionConfig.turnUrls.length) {
-              daemonAgentUrl.searchParams.set('turnUrls', sessionConfig.turnUrls.join(','));
+              daemonUrl.searchParams.set('turnUrls', sessionConfig.turnUrls.join(','));
             }
             if (sessionConfig.turnUsername) {
-              daemonAgentUrl.searchParams.set('turnUsername', sessionConfig.turnUsername);
+              daemonUrl.searchParams.set('turnUsername', sessionConfig.turnUsername);
             }
             if (sessionConfig.turnCredential) {
-              daemonAgentUrl.searchParams.set('turnCredential', sessionConfig.turnCredential);
+              daemonUrl.searchParams.set('turnCredential', sessionConfig.turnCredential);
             }
 
             await submitCommand({
               type: 'open_url',
-              payload: { url: daemonAgentUrl.toString() },
+              payload: { url: daemonUrl.toString() },
             });
           }
 

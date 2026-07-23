@@ -4,25 +4,27 @@
   "daemonId": "daemon-1",
   "headless": true,
   "stunUrls": [
-    "stun:example.com:3478"
+    "stun:47.98.142.84:3478"
   ],
   "turnUrls": [
-    "turn:example.com:3478?transport=udp",
-    "turn:example.com:3478?transport=tcp"
+    "turn:47.98.142.84:3478?transport=udp",
+    "turn:47.98.142.84:3478?transport=tcp",
+    "turns:47.98.142.84:443?transport=tcp"
   ],
-  "turnUsername": "username",
-  "turnCredential": "password",
+  "turnUsername": "agentic-browser",
+  "turnCredential": "IWPE_media-OWT-2026",
   "rtcIceServers": [
     {
-      "urls": "stun:example.com:3478"
+      "urls": "stun:47.98.142.84:3478"
     },
     {
       "urls": [
-        "turn:example.com:3478?transport=udp",
-        "turn:example.com:3478?transport=tcp"
+        "turn:47.98.142.84:3478?transport=udp",
+        "turn:47.98.142.84:3478?transport=tcp",
+        "turns:47.98.142.84:443?transport=tcp"
       ],
-      "username": "username",
-      "credential": "password"
+      "username": "agentic-browser",
+      "credential": "IWPE_media-OWT-2026"
     }
   ]
 }

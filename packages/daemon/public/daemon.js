@@ -5,7 +5,7 @@ import { decodeMouseCommandBinary } from '/client-sdk/mouseCommandBinary.js';
 
 async function loadRuntimeConfig() {
   try {
-    const response = await fetch('/daemon-agent.config.json', { cache: 'no-store' });
+    const response = await fetch('/daemon.config.json', { cache: 'no-store' });
     if (!response.ok) {
       return {};
     }
@@ -131,7 +131,7 @@ async function loadRuntimeConfig() {
   }
 
   async function submitLocalDaemonCommand(command) {
-    const response = await fetch('/daemon-agent.command', {
+    const response = await fetch('/daemon.command', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -217,7 +217,7 @@ async function loadRuntimeConfig() {
     pendingCalibrationClientId = null;
     pendingCalibrationAttempt = 0;
 
-    console.log('[daemon-cli] calibrate_result received', payload);
+    console.log('[daemon] calibrate_result received', payload);
     let retryConfig = null;
 
     try {

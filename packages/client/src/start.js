@@ -82,11 +82,10 @@ const MIME_TYPES = {
 
 function resolveSafePath(reqPath) {
   const rawPath = decodeURIComponent(reqPath.split('?')[0]);
-  const normalized = rawPath === '/' ? '/client.html' : rawPath;
+  const normalized = rawPath === '/' ? '/mobile_client.html' : rawPath;
   const relative = normalized.replace(/^\/+/, '');
   const isPublicAsset =
     relative.startsWith('vendor/') ||
-    relative === 'client.html' ||
     relative === 'mobile_client.html';
   const baseDir = isPublicAsset ? path.resolve(rootDir, 'public') : rootDir;
   const candidate = path.resolve(baseDir, relative);

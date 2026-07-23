@@ -5,9 +5,9 @@ Daemon sub-project for Agentic Browser P2P in pure endpoint mode.
 It provides:
 
 - Local CLI browser operations via Puppeteer.
-- Runtime config generation for daemon peer page from `.env`.
+- Runtime config generation for the daemon control page from `.env`.
 - Static file hosting for `public/` so daemon page is opened over `http://`.
-- Browser daemon peer page (`public/daemon-agent.html`) that connects to OWT signaling server and exchanges data over `Owt.P2P.P2PClient`.
+- Browser daemon control page (`public/daemon.html`) that connects to OWT signaling server and exchanges data over `Owt.P2P.P2PClient`.
 - REST API endpoints for agent-driven daemon control (launch/open/share/close/exit).
 
 There is no daemon signaling API in this mode. The built-in static server only serves local frontend files.
@@ -29,16 +29,16 @@ From package folder:
 
 On startup daemon writes runtime config file:
 
-- `public/daemon-agent.config.json`
+- `public/daemon.config.json`
 
-And starts a local static server bound to all interfaces by default (listen host `0.0.0.0`, default port `8788`), then prints an `http://.../daemon-agent.html?...` URL for opening the daemon peer page.
+And starts a local static server bound to all interfaces by default (listen host `0.0.0.0`, default port `8788`), then prints an `http://.../daemon.html?...` URL for opening the daemon control page.
 
-The same static server also exposes browser modules from `src/daemon/` under `/daemon-src/*` for `public/daemon-agent.js` imports.
+The same static server also exposes browser modules from `src/daemon/` under `/daemon-src/*` for `public/daemon.js` imports.
 
 ## Alternative Dev Mode
 
 - `pnpm dev:daemon` from workspace root
-- `pnpm dev` from workspace root (runs daemon, client, and agent together)
+- `pnpm dev` from workspace root (runs daemon and client together)
 
 ## Environment Variables
 
@@ -115,36 +115,36 @@ The client sends lifecycle control messages over the OWT P2P data channel. Daemo
 
 1. Client detects `pagehide` or `beforeunload` browser event.
 2. Client sends `{ type: 'leave', payload: { clientId, reason } }` over data channel with up to 500ms delivery window.
-3. Daemon-agent page (`daemon-agent.js`) receives message, logs it, sets `intentionalDisconnect = true`, and calls `disconnect()` to leave the signaling server.
+3. Daemon-cli page (`daemon.js`) receives message, logs it, sets `intentionalDisconnect = true`, and calls `disconnect()` to leave the signaling server.
 4. Node daemon (`index.js` `onAgentEvent`) receives the `peer_message` event, calls `completeSession('leave', ...)`, which clears the client message timeout and notifies any session completion waiters.
 
 ### Flow: `finish`
 
 1. User clicks Finish in the client UI.
 2. Client sends `{ type: 'finish', payload: { clientId, reason } }` over data channel.
-3. Daemon-agent page receives message, sets `intentionalDisconnect = true`, and calls `disconnect()`.
+3. Daemon-cli page receives message, sets `intentionalDisconnect = true`, and calls `disconnect()`.
 4. Node daemon receives event, captures a finish snapshot, calls `completeSession('success', ...)`, and enqueues a `finish_ack` peer notice back to the client.
 
 ### Flow: `timeout`
 
 1. Client-side inactivity timer fires after no meaningful user activity.
 2. Client sends `{ type: 'timeout', payload: { clientId, reason } }` over data channel.
-3. Daemon-agent page receives message, sets `intentionalDisconnect = true`, and calls `disconnect()`.
+3. Daemon-cli page receives message, sets `intentionalDisconnect = true`, and calls `disconnect()`.
 4. Node daemon's own independent client message timeout may also fire and capture a snapshot if no other message has been received.
 
 ### Intentional Disconnect Flag
 
-When daemon-agent processes any termination message, it immediately sets `intentionalDisconnect = true` before calling the async `disconnect()`. This prevents race conditions where the P2P client's internal reconnect logic could re-establish the signaling connection before the graceful shutdown completes.
+When daemon processes any termination message, it immediately sets `intentionalDisconnect = true` before calling the async `disconnect()`. This prevents race conditions where the P2P client's internal reconnect logic could re-establish the signaling connection before the graceful shutdown completes.
 
 ## REST API (Agent Workflow)
 
 Base URL defaults to `http://localhost:8788`.
 
 - `GET /api/v1/status`
-  - Returns daemon runtime state, browser status, and daemon-agent bridge status.
+  - Returns daemon runtime state, browser status, and daemon bridge status.
 - `GET /api/v1/agent/ready`
-  - Returns whether daemon-agent bridge is online.
-  - Use `?bootstrap=true` to auto-launch/open daemon-agent and wait for bridge readiness.
+  - Returns whether daemon bridge is online.
+  - Use `?bootstrap=true` to auto-launch/open daemon and wait for bridge readiness.
 - `POST /api/v1/chrome/launch`
   - Launches headful Chrome through Puppeteer.
   - Body example:
@@ -163,8 +163,8 @@ Base URL defaults to `http://localhost:8788`.
 - `POST /api/v1/session/start`
   - Unified session-start endpoint:
     - Launch Chrome if not running.
-    - Open/re-open daemon-agent page and target page.
-    - Connect daemon-agent to signaling server.
+    - Open/re-open daemon page and target page.
+    - Connect daemon to signaling server.
     - Wait for client connection and `resolve` message, or accept an early `finish` as terminal completion.
     - Continue command replay over data channel after resolve.
     - Arm timeout snapshot flow for this session.
@@ -188,7 +188,7 @@ Base URL defaults to `http://localhost:8788`.
     ```
 
 - `POST /api/v1/page/open`
-  - Enqueues target open on daemon-agent page.
+  - Enqueues target open on daemon page.
   - Body example:
 
     ```json
@@ -216,7 +216,7 @@ Base URL defaults to `http://localhost:8788`.
     ```
 
 - `POST /api/v1/action/connect`
-  - Primary Take Action flow: enqueue daemon-agent session update, signaling connect-only, and client notification.
+  - Primary Take Action flow: enqueue daemon session update, signaling connect-only, and client notification.
   - Body example:
 
     ```json
@@ -233,7 +233,7 @@ Base URL defaults to `http://localhost:8788`.
     ```
 
 - `POST /api/v1/share/start`
-  - Legacy convenience flow: enqueues daemon-agent connect + immediate share.
+  - Legacy convenience flow: enqueues daemon connect + immediate share.
   - Body example:
 
     ```json
@@ -244,25 +244,25 @@ Base URL defaults to `http://localhost:8788`.
     ```
 
 - `POST /api/v1/share/stop`
-  - Stops active sharing by enqueueing a daemon-agent disconnect.
+  - Stops active sharing by enqueueing a daemon disconnect.
   - After stop completes, call `POST /api/v1/share/start` again to trigger a fresh share.
 - `GET /api/v1/share/preflight`
   - Returns daemon-side share readiness diagnostics for automatic share.
   - Includes runtime mode (`remote-devtools` or `putter`), browser connection mode (`launched` or `attached`), required flag checks, and warnings when auto-share reliability may be reduced.
 - `POST /api/v1/page/close`
-  - Enqueues target close on daemon-agent page.
+  - Enqueues target close on daemon page.
 - `POST /api/v1/chrome/exit`
   - Exits Puppeteer-launched Chrome.
 
-Bridge endpoints used internally by daemon-agent page:
+Bridge endpoints used internally by daemon page:
 
 - `GET /api/v1/agent/commands?after=<id>`
 - `POST /api/v1/agent/events`
 
 Important:
 
-- `page/open`, `page/close`, `action/connect`, `share/start`, and `share/stop` require daemon-agent page to be open and polling bridge commands.
-- This keeps screen-share and bridge-triggered control in the daemon-agent browser context.
+- `page/open`, `page/close`, `action/connect`, `share/start`, and `share/stop` require daemon page to be open and polling bridge commands.
+- This keeps screen-share and bridge-triggered control in the daemon browser context.
 
 Example curl sequence for the full agent flow is in `tests/scripts/daemon-rest-api-curl.sh`.
 
@@ -279,7 +279,7 @@ Example curl sequence for the full agent flow is in `tests/scripts/daemon-rest-a
 
 ## Frontend Refactor
 
-- `public/daemon-agent.js` focuses on orchestration, OWT setup, and command/result logging.
+- `public/daemon.js` focuses on orchestration, OWT setup, and command/result logging.
 - Direct local command support in Node lives in `src/daemon/browserController.js` and `src/daemon/commandProcessor.js`.
 
 ## Local CLI
@@ -351,9 +351,9 @@ Stages:
 
 - `start`: session object initialized.
 - `lauch_chrome`: launch/attach phase for browser control (spelling kept for compatibility).
-- `open_daemon_agent_page`: daemon-agent page open/re-open phase.
+- `open_daemon_page`: daemon page open/re-open phase.
 - `open_target_page`: target page open/navigation phase.
-- `connect_to_signalServer`: daemon-agent signaling connection phase.
+- `connect_to_signalServer`: daemon signaling connection phase.
 - `wait_client_resolve`: waiting for client resolve command.
 - `user_interaction`: client command replay/share in progress.
 - `finish`: terminal stage (success/timeout/error).

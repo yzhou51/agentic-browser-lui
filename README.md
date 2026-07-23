@@ -1,19 +1,16 @@
 # agentic-browser-lui
 
-Node.js pnpm workspace for an agentic browser P2P system with three sub-projects:
+Node.js pnpm workspace for an agentic browser P2P system with two sub-projects:
 
 - `packages/daemon`: Daemon endpoint tooling, local CLI, daemon-side WebRTC page, and REST bridge for browser control.
 - `packages/client`: Client SDK and demo UI that receives daemon video stream and sends operation commands via data channel.
-- `packages/agent`: Agent control page that calls daemon REST APIs (`connect`, `share/start`, `share/stop`, `page/open`, `chrome/launch`, and so on).
 
 ## Project Layout
 
-- `packages/daemon/public`: daemon operator UI (`daemon-agent.html`) and browser entrypoint (`daemon-agent.js`).
+- `packages/daemon/public`: daemon control UI (`daemon.html`) and browser entrypoint (`daemon.js`).
 - `packages/daemon/src`: daemon CLI/server/runtime code, including REST endpoints.
 - `packages/client/src/sdk`: reusable client SDK pieces, including the main client wrapper and viewer/pointer helpers used by the demo.
 - `packages/client/src/demo`: demo UI wired on top of the SDK exports.
-- `packages/agent/public/agent.html`: standalone agent action page.
-- `packages/agent/src/demo`: agent action handlers for daemon REST orchestration.
 
 ## Prerequisites
 
@@ -46,11 +43,6 @@ Node.js pnpm workspace for an agentic browser P2P system with three sub-projects
    ```bash
    cp packages/client/.env.example packages/client/.env
    # Edit packages/client/.env with your local values
-   ```
-4. Prepare agent runtime env:
-   ```bash
-   cp packages/agent/.env.example packages/agent/.env
-   # Edit packages/agent/.env with your local values
    ```
 
 ## Start External OWT Signaling Server
@@ -106,7 +98,7 @@ For production or network scenarios where direct P2P is blocked, configure STUN/
    - Or set in `.env` files:
      - `packages/client/.env`: `STUN_SERVER_URLS`, `TURN_SERVER_URLS`, `TURN_USERNAME`, `TURN_CREDENTIAL`
      - `packages/daemon/.env`: Same environment variables
-   - Or in runtime config JSON files (`client-demo.runtime.json`, `daemon-agent.config.json`)
+   - Or in runtime config JSON files (`client-demo.runtime.json`, `daemon.config.json`)
 
 ## Run
 
@@ -143,7 +135,7 @@ Use this when Chrome is already running with `--remote-debugging-port` enabled.
    ```
 
 4. Open client demo URL:
-   - Default: `http://127.0.0.1:5174/client.html`
+   - Default: `http://127.0.0.1:5174/mobile_client.html`
    - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
    - Ensure `Daemon API URL` points to daemon static server (`http://localhost:8788`)
    - Click `Connect` and use controls to interact with the target
@@ -167,10 +159,10 @@ Use this when you want the daemon to launch Chrome automatically via Puppeteer.
      --targetUrl http://localhost:5174/target-demo.html
    ```
 
-3. Daemon automatically launches Chrome, opens daemon-agent page, and opens target page
+3. Daemon automatically launches Chrome, opens daemon page, and opens target page
 
 4. Open client demo URL:
-   - Default: `http://127.0.0.1:5174/client.html`
+   - Default: `http://127.0.0.1:5174/mobile_client.html`
    - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
    - Ensure `Daemon API URL` points to daemon static server (`http://localhost:8788`)
    - Click `Connect` and use controls to interact with the target
@@ -229,7 +221,6 @@ pnpm dev
 # Or run individually
 pnpm dev:daemon      # Daemon with auto-restart
 pnpm dev:client      # Vite dev server (http://localhost:5173)
-pnpm dev:agent       # Agent static server
 ```
 
 ## Core flow
@@ -238,7 +229,7 @@ pnpm dev:agent       # Agent static server
 sequenceDiagram
     participant Agent
     participant Daemon
-    participant DaemonAgent as Daemon-Agent Page
+    participant DaemonPage as Daemon Page
     participant Signal as OWT Signaling
     participant Client
 
@@ -256,34 +247,34 @@ sequenceDiagram
         Daemon->>Daemon: Launch new Chrome via Puppeteer (putter mode)
     end
 
-    Daemon->>DaemonAgent: Open daemon-agent page in Chrome
+    Daemon->>DaemonPage: Open daemon page in Chrome
     Daemon->>Daemon: Open controlled target page in Chrome
-    DaemonAgent->>Signal: Connect to OWT signaling server
+    DaemonPage->>Signal: Connect to OWT signaling server
 
     loop retry on timeout (2s deadline,  5 attempts)
-        Client->>DaemonAgent: Send Resolve over OWT data channel
-        DaemonAgent-->>Client: Send resolve_ack (acknowledgment)
+        Client->>DaemonPage: Send Resolve over OWT data channel
+        DaemonPage-->>Client: Send resolve_ack (acknowledgment)
     end
 
-    DaemonAgent->>DaemonAgent: Capture and publish screen share stream (getDisplayMedia)
-    DaemonAgent-->>Client: Send resolve_result (ok or error)
+    DaemonPage->>DaemonPage: Capture and publish screen share stream (getDisplayMedia)
+    DaemonPage-->>Client: Send resolve_result (ok or error)
     Client->>Client: Receive video stream, enable remote interaction
 
     loop User interaction session
-        Client->>DaemonAgent: Send mouse/keyboard/text commands (binary-encoded) over data channel
-        DaemonAgent->>Daemon: Forward command to Puppeteer via REST bridge
+        Client->>DaemonPage: Send mouse/keyboard/text commands (binary-encoded) over data channel
+        DaemonPage->>Daemon: Forward command to Puppeteer via REST bridge
         Daemon->>Daemon: Replay command on controlled target page
-        DaemonAgent-->>Client: Send command_result over data channel
+        DaemonPage-->>Client: Send command_result over data channel
     end
 
     alt Client page closes or navigates away
-        Client->>DaemonAgent: Send Leave (best-effort, 500ms window)
-        DaemonAgent->>Signal: Disconnect from signaling
+        Client->>DaemonPage: Send Leave (best-effort, 500ms window)
+        DaemonPage->>Signal: Disconnect from signaling
         Daemon->>Daemon: Capture leave snapshot
         Daemon->>Agent: Session completes with outcome=leave
     else User clicks Finish button
-        Client->>DaemonAgent: Send Finish over data channel
-        DaemonAgent->>Signal: Disconnect from signaling
+        Client->>DaemonPage: Send Finish over data channel
+        DaemonPage->>Signal: Disconnect from signaling
         Daemon->>Daemon: Capture finish snapshot
         Daemon->>Agent: Session completes with outcome=success
     else No client message within timeout window
@@ -302,7 +293,6 @@ sequenceDiagram
 ## Refactoring Notes
 
 - Client-side viewer geometry and mouse-command helpers were moved from the demo into `packages/client/src/sdk/viewerUtils.js` and re-exported by `packages/client/src/sdk/index.js`.
-- Agent control actions are maintained in the standalone `packages/agent` package.
 
 ## Notes
 

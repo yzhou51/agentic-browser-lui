@@ -4,7 +4,7 @@ set -euo pipefail
 # Agent-style REST workflow for daemon control.
 # Prerequisites:
 # 1) Daemon is running (pnpm start:daemon).
-# 2) Daemon page is open in browser: http://localhost:8788/daemon-agent.html
+# 2) Daemon page is open in browser: http://localhost:8788/daemon.html
 
 DAEMON_API_URL="${DAEMON_API_URL:-http://localhost:8788}"
 DAEMON_ID="${DAEMON_ID:-daemon-1}"
@@ -98,7 +98,7 @@ json_post '/api/v1/share/start' "$(cat <<JSON
 JSON
 )"
 
-echo "Now complete screen picker in daemon-agent browser tab if prompted."
+echo "Now complete screen picker in daemon browser tab if prompted."
 
 echo "== status after share/start =="
 curl -sS "${DAEMON_API_URL}/api/v1/status"
@@ -121,7 +121,7 @@ json_post '/api/v1/share/start' "$(cat <<JSON
 JSON
 )"
 
-echo "Now complete screen picker again in daemon-agent browser tab if prompted."
+echo "Now complete screen picker again in daemon browser tab if prompted."
 
 echo "== status after share restart =="
 curl -sS "${DAEMON_API_URL}/api/v1/status"

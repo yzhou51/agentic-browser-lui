@@ -62,7 +62,7 @@ export class AgentControlBridge {
     };
 
     if (result.ok === false) {
-      this.state.lastError = result.error || 'Unknown daemon-agent command error.';
+      this.state.lastError = result.error || 'Unknown daemon command error.';
     } else if (result.ok === true) {
       this.state.lastError = null;
     }

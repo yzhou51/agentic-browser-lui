@@ -35,10 +35,10 @@ function readBoolean(value, fallback = false) {
 const clientMessageTimeoutSeconds = readPositiveInt(process.env.DAEMON_CLIENT_MESSAGE_TIMEOUT_SECONDS, 120);
 
 // ICE config is single-sourced from RTC_ICE_SERVERS_JSON (the same variable the
-// client and agent use), with the individual STUN_SERVER_URLS/TURN_* vars kept
+// client uses), with the individual STUN_SERVER_URLS/TURN_* vars kept
 // only as a fallback. normalizeRtcIceOptions derives stun/turn url lists and
 // credentials from whichever form is supplied, so downstream (server.js ->
-// daemon-agent.html query params) keeps working unchanged.
+// daemon.html query params) keeps working unchanged.
 const parsedRtcIceServers = parseRtcIceServersJson(process.env.RTC_ICE_SERVERS_JSON);
 if (String(process.env.RTC_ICE_SERVERS_JSON || '').trim() && !parsedRtcIceServers.length) {
   console.warn('Ignoring invalid RTC_ICE_SERVERS_JSON in daemon .env.');

@@ -233,7 +233,7 @@ const sessionSnapshots = [];
 const SESSION_STAGES = {
   START: 'start',
   LAUNCH_CHROME: 'lauch_chrome',
-  OPEN_DAEMON_AGENT_PAGE: 'open_daemon_agent_page',
+  OPEN_DAEMON_PAGE: 'open_daemon_page',
   OPEN_TARGET_PAGE: 'open_target_page',
   CONNECT_TO_SIGNAL_SERVER: 'connect_to_signalServer',
   WAIT_CLIENT_RESOLVE: 'wait_client_resolve',
@@ -365,16 +365,16 @@ async function handleTerminationMessage(options = {}) {
     });
   }
 
-  // Close only the daemon-cli.html control page as part of termination cleanup
+  // Close only the daemon.html control page as part of termination cleanup
   // (client finish/leave or timeout). This must run BEFORE completeSession(),
   // because completeSession() notifies the completion waiters that drive the
   // runtime's browser shutdown -- once that teardown starts it races (and closes)
   // the CDP connection, making page.close() fail. The target page and the browser
   // itself are intentionally left untouched here.
   try {
-    await browser.closeDaemonCliPage();
+    await browser.closeDaemonPage();
   } catch (error) {
-    logger.warn(`Failed to close daemon-cli page on ${outcome}.`, {
+    logger.warn(`Failed to close daemon page on ${outcome}.`, {
       error: error.message,
     });
   }
@@ -750,8 +750,8 @@ async function startSessionWorkflow(payload = {}) {
   const sessionId = requestedSessionId || createSessionId();
   const timeoutSeconds = parseTimeoutSeconds(payload.timeout, Math.max(1, Math.floor((config.clientMessageTimeoutMs || 120000) / 1000)));
   const timeoutMs = timeoutSeconds * 1000;
-  const agentPageNameRaw = String(payload.agentPage || '').trim().toLowerCase();
-  const agentPageName = agentPageNameRaw === 'daemon-cli.html' ? 'daemon-cli.html' : 'daemon-agent.html';
+  // daemon.html is the sole daemon-side control page.
+  const agentPageName = 'daemon.html';
   const signalingServer = String(payload.signalingServer || session.signalingServer || config.signalingServer || '').trim();
   const stunUrls = normalizeIceUrlList(payload.stunUrls).length
     ? normalizeIceUrlList(payload.stunUrls)
@@ -820,27 +820,27 @@ async function startSessionWorkflow(payload = {}) {
     config.staticServerHost === '0.0.0.0' || config.staticServerHost === '::'
       ? 'localhost'
       : config.staticServerHost;
-  const daemonAgentUrl = new URL(`http://${openHost}:${config.staticServerPort}/${agentPageName}`);
-  daemonAgentUrl.searchParams.set('uid', daemonId);
-  daemonAgentUrl.searchParams.set('remote', clientId);
-  daemonAgentUrl.searchParams.set('host', signalingServer);
+  const daemonUrl = new URL(`http://${openHost}:${config.staticServerPort}/${agentPageName}`);
+  daemonUrl.searchParams.set('uid', daemonId);
+  daemonUrl.searchParams.set('remote', clientId);
+  daemonUrl.searchParams.set('host', signalingServer);
   if (stunUrls.length) {
-    daemonAgentUrl.searchParams.set('stunUrls', stunUrls.join(','));
+    daemonUrl.searchParams.set('stunUrls', stunUrls.join(','));
   }
   if (turnUrls.length) {
-    daemonAgentUrl.searchParams.set('turnUrls', turnUrls.join(','));
+    daemonUrl.searchParams.set('turnUrls', turnUrls.join(','));
   }
   if (turnUsername) {
-    daemonAgentUrl.searchParams.set('turnUsername', turnUsername);
+    daemonUrl.searchParams.set('turnUsername', turnUsername);
   }
   if (turnCredential) {
-    daemonAgentUrl.searchParams.set('turnCredential', turnCredential);
+    daemonUrl.searchParams.set('turnCredential', turnCredential);
   }
 
-  updateSessionProgress(SESSION_STAGES.OPEN_DAEMON_AGENT_PAGE, 'running', 'opening daemon-agent page');
+  updateSessionProgress(SESSION_STAGES.OPEN_DAEMON_PAGE, 'running', 'opening daemon page');
   await commands.handle({
     type: 'open_url',
-    payload: { url: daemonAgentUrl.toString() },
+    payload: { url: daemonUrl.toString() },
   });
   updateSessionProgress(SESSION_STAGES.OPEN_TARGET_PAGE, 'running', 'opening target page');
   const openTargetResult = await commands.handle({
@@ -853,8 +853,8 @@ async function startSessionWorkflow(payload = {}) {
 
   const online = await waitForAgentOnline(12000);
   if (!online) {
-    updateSessionProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'error', 'daemon-agent bridge did not come online in time');
-    throw new Error('daemon-agent bridge did not come online in time.');
+    updateSessionProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'error', 'daemon bridge did not come online in time');
+    throw new Error('daemon bridge did not come online in time.');
   }
 
   updateSessionProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'running', 'connecting to signaling server');
@@ -914,7 +914,7 @@ async function startSessionWorkflow(payload = {}) {
     completion,
     agentPage: agentPageName,
     flow: {
-      interaction: 'Client sends mouse/keyboard/text over data channel; daemon-agent replays to Puppeteer target.',
+      interaction: 'Client sends mouse/keyboard/text over data channel; daemon replays to Puppeteer target.',
       timeoutSnapshot: `Timeout (${timeoutSeconds}s) captures snapshot and returns timeout status.`,
     },
   };
@@ -945,8 +945,7 @@ if (process.argv.length > 2 && !toolModePayload) {
     config.staticServerHost === '0.0.0.0' || config.staticServerHost === '::'
       ? 'localhost'
       : config.staticServerHost;
-  const daemonAgentUrl = `http://${openHost}:${config.staticServerPort}/daemon-agent.html?uid=${encodeURIComponent(session.daemonId)}&remote=${encodeURIComponent(session.clientId)}`;
-  const daemonCliUrl = `http://${openHost}:${config.staticServerPort}/daemon-cli.html?uid=${encodeURIComponent(session.daemonId)}&remote=${encodeURIComponent(session.clientId)}&host=${encodeURIComponent(session.signalingServer)}`;
+  const daemonUrl = `http://${openHost}:${config.staticServerPort}/daemon.html?uid=${encodeURIComponent(session.daemonId)}&remote=${encodeURIComponent(session.clientId)}&host=${encodeURIComponent(session.signalingServer)}`;
 
   const server = await startStaticServer({
     rootDir: publicDir,
@@ -954,13 +953,13 @@ if (process.argv.length > 2 && !toolModePayload) {
     clientSdkDir,
     host: config.staticServerHost,
     port: config.staticServerPort,
-    getDaemonAgentConfig: () => ({
+    getDaemonConfig: () => ({
       ...session,
       headless: config.browserHeadless,
       runtimeMode: browser.getRuntimeMode(),
       browserConnectionMode: browser.browserConnectionMode,
       // Prefer the active session's timeout: it is assigned early in
-      // startSessionWorkflow (before the daemon-agent page is opened and fetches
+      // startSessionWorkflow (before the daemon page is opened and fetches
       // this config), whereas currentClientMessageTimeoutMs is only armed later.
       // Reading currentClientMessageTimeoutMs here would return the default
       // (e.g. 120s) instead of the session's --timeout value (e.g. 300s).
@@ -1021,7 +1020,7 @@ if (process.argv.length > 2 && !toolModePayload) {
       }
       if (kind === 'status') {
         if (event.status === 'connected') {
-          logger.info('daemon-agent signaling connected', {
+          logger.info('daemon signaling connected', {
             daemonId: String(event?.state?.daemonId || ''),
             clientId: String(event?.state?.clientId || ''),
             signalingServer: String(event?.state?.signalingServer || ''),
@@ -1029,7 +1028,7 @@ if (process.argv.length > 2 && !toolModePayload) {
           });
         }
         if (event.status === 'sharing') {
-          logger.info('daemon-agent share diagnostics', {
+          logger.info('daemon share diagnostics', {
             automated: Boolean(event?.state?.automated),
             manualPromptShown: Boolean(event?.state?.manualPromptShown),
             controlTargetMode: String(event?.state?.controlTargetMode || ''),
@@ -1076,7 +1075,7 @@ if (process.argv.length > 2 && !toolModePayload) {
           // Keep raw message logging even for non-JSON payloads.
         }
 
-        logger.debug('daemon-agent peer message received', {
+        logger.debug('daemon peer message received', {
           origin: String(event?.origin || ''),
           type: parsedType,
           requestId: parsedRequestId,
@@ -1212,7 +1211,7 @@ if (process.argv.length > 2 && !toolModePayload) {
       }
       if (kind === 'peer_command_result') {
         const resultType = String(event?.type || '').trim().toLowerCase();
-        logger.debug('daemon-agent peer command result', {
+        logger.debug('daemon peer command result', {
           requestId: String(event?.requestId || ''),
           type: resultType,
           ok: event?.ok !== false,
@@ -1254,8 +1253,7 @@ if (process.argv.length > 2 && !toolModePayload) {
     },
     isAgentOnline: () => agentBridge.isOnline(10000),
     bootstrapAgentBridge: async () => {
-      const pageName = toolModePayload ? 'daemon-cli.html' : 'daemon-agent.html';
-      const targetUrl = `http://${openHost}:${config.staticServerPort}/${pageName}?uid=${encodeURIComponent(session.daemonId)}&remote=${encodeURIComponent(session.clientId)}&host=${encodeURIComponent(session.signalingServer)}`;
+      const targetUrl = `http://${openHost}:${config.staticServerPort}/daemon.html?uid=${encodeURIComponent(session.daemonId)}&remote=${encodeURIComponent(session.clientId)}&host=${encodeURIComponent(session.signalingServer)}`;
       await commands.handle({ type: 'open_url', payload: { url: targetUrl } });
     },
   });
@@ -1355,8 +1353,7 @@ if (process.argv.length > 2 && !toolModePayload) {
 
   logger.info(`Using external OWT signaling server: ${session.signalingServer}`);
   logger.info(`Daemon static server running: http://${config.staticServerHost}:${config.staticServerPort}`);
-  logger.info(`Open daemon peer page: ${daemonAgentUrl}`);
-  logger.info(`Open daemon CLI page: ${daemonCliUrl}`);
+  logger.info(`Open daemon page: ${daemonUrl}`);
   logger.info(`Daemon log level: ${config.daemonLogLevel}`);
   logger.info('[MODE] Effective browser mode', {
     env: {
@@ -1381,10 +1378,10 @@ if (process.argv.length > 2 && !toolModePayload) {
   if (!toolModePayload) {
     try {
       await commands.handle({ type: 'launch_chrome' });
-      await commands.handle({ type: 'open_url', payload: { url: daemonCliUrl } });
-      logger.info('Opened daemon CLI page on startup.');
+      await commands.handle({ type: 'open_url', payload: { url: daemonUrl } });
+      logger.info('Opened daemon page on startup.');
     } catch (error) {
-      logger.warn('Failed to auto-open daemon CLI page on startup.', {
+      logger.warn('Failed to auto-open daemon page on startup.', {
         error: error?.message || String(error || ''),
       });
     }
@@ -1402,7 +1399,7 @@ if (process.argv.length > 2 && !toolModePayload) {
     try {
       const startResult = await startSessionWorkflow({
         ...toolModePayload,
-        agentPage: 'daemon-cli.html',
+        agentPage: 'daemon.html',
       });
       const toolModeRuntime = createToolModeRuntime({
         browser,

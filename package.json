@@ -4,13 +4,11 @@
   "version": "0.1.0",
   "packageManager": "pnpm@9.12.3",
   "scripts": {
-    "dev": "pnpm -r --parallel --filter @agentic-browser/daemon --filter @agentic-browser/client --filter @agentic-browser/agent dev",
+    "dev": "pnpm -r --parallel --filter @agentic-browser/daemon --filter @agentic-browser/client dev",
     "dev:daemon": "pnpm --filter @agentic-browser/daemon dev",
     "dev:client": "pnpm --filter @agentic-browser/client dev",
-    "dev:agent": "pnpm --filter @agentic-browser/agent dev",
     "start:daemon": "pnpm --filter @agentic-browser/daemon start",
     "start:client": "pnpm --filter @agentic-browser/client start",
-    "start:agent": "pnpm --filter @agentic-browser/agent start",
     "build:client": "pnpm --filter @agentic-browser/client build",
     "test:signal": "node tests/scripts/signal-smoke-test.mjs"
   },

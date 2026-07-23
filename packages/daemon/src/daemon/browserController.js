@@ -77,8 +77,10 @@ function resolveDefaultCacheDir() {
   return path.resolve(__dirname, '../../.chrome-cache');
 }
 
-function isDaemonAgentUrl(url = '') {
-  return /\/(daemon-agent|daemon-cli)\.html(?:[?#]|$)/i.test(String(url || ''));
+// The daemon control page (daemon.html) is opened in the background; every
+// other non-blank page is treated as the shareable target page.
+function isDaemonControlUrl(url = '') {
+  return /\/daemon\.html(?:[?#]|$)/i.test(String(url || ''));
 }
 
 function mapRemoteCoordinatesLegacy(payload = {}, { targetWidth = 1, targetHeight = 1 } = {}) {
@@ -659,13 +661,13 @@ export class BrowserController {
     }
 
     const pages = await this.browser.pages();
-    const daemonPage = pages.find((entry) => isDaemonAgentUrl(entry.url()));
+    const daemonPage = pages.find((entry) => isDaemonControlUrl(entry.url()));
     const targetCandidate = pages.find((entry) => {
       const url = String(entry.url() || '').trim();
       if (!url || url === 'about:blank') {
         return false;
       }
-      return !isDaemonAgentUrl(url);
+      return !isDaemonControlUrl(url);
     });
 
     if (daemonPage) {
@@ -738,10 +740,10 @@ export class BrowserController {
 
   async open(url) {
     const resolvedUrl = String(url || '').trim();
-    if (isDaemonAgentUrl(resolvedUrl)) {
+    if (isDaemonControlUrl(resolvedUrl)) {
       const daemonPage = await this.ensureDaemonPage();
       await daemonPage.goto(resolvedUrl, { waitUntil: 'domcontentloaded' });
-      logger.info('daemon-agent opened in background; restoring focus to target page when available.');
+      logger.info('daemon opened in background; restoring focus to target page when available.');
       await this.focusTargetPageIfAvailable();
       return;
     }
@@ -1639,10 +1641,10 @@ export class BrowserController {
     this.page = null;
   }
 
-  // Close ONLY the daemon-cli.html control page. Used during session termination
+  // Close ONLY the daemon.html control page. Used during session termination
   // cleanup (client finish/leave or timeout) so the control tab is dismissed while
   // the target page and the browser itself are left untouched.
-  async closeDaemonCliPage() {
+  async closeDaemonPage() {
     if (!this.browser) {
       return;
     }
@@ -1651,7 +1653,7 @@ export class BrowserController {
     try {
       pages = await this.browser.pages();
     } catch (error) {
-      logger.warn(`closeDaemonCliPage: failed to list pages: ${error.message}`);
+      logger.warn(`closeDaemonPage: failed to list pages: ${error.message}`);
       return;
     }
 
@@ -1659,11 +1661,11 @@ export class BrowserController {
       let url = '';
       try {
         url = String(entry.url() || '');
-        logger.debug(`closeDaemonCliPage: checking page URL: ${url}`);
+        logger.debug(`closeDaemonPage: checking page URL: ${url}`);
       } catch {
         continue;
       }
-      if (!/\/daemon-cli\.html(?:[?#]|$)/i.test(url)) {
+      if (!/\/daemon\.html(?:[?#]|$)/i.test(url)) {
         continue;
       }
       if (typeof entry.isClosed === 'function' && entry.isClosed()) {
@@ -1675,7 +1677,7 @@ export class BrowserController {
       try {
         await entry.close();
       } catch (error) {
-        logger.warn(`closeDaemonCliPage: failed to close page: ${error.message}`);
+        logger.warn(`closeDaemonPage: failed to close page: ${error.message}`);
       }
       if (entry === this.page) {
         this.page = null;
