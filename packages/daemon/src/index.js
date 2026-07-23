@@ -224,11 +224,6 @@ let clientMessageTimeoutHandle = null;
 let pendingLeaveHandle = null;
 let pendingLeaveClientId = '';
 let currentClientMessageTimeoutMs = Number(config.clientMessageTimeoutMs || 120000);
-let latestTimeoutSnapshot = {
-  path: '',
-  targetUrl: '',
-  capturedAt: 0,
-};
 const sessionSnapshots = [];
 const SESSION_STAGES = {
   START: 'start',
@@ -617,57 +612,6 @@ function rememberTimeoutSnapshot(snapshot = {}, type = 'timeout') {
     timestamp: new Date(capturedAt).toISOString(),
     path: snapshotPath,
   });
-
-  latestTimeoutSnapshot = {
-    path: snapshotPath,
-    targetUrl: String(snapshot?.targetPage?.url || '').trim(),
-    capturedAt,
-  };
-}
-
-function getLatestTimeoutSnapshot() {
-  const rememberedPath = String(latestTimeoutSnapshot.path || '').trim();
-  if (rememberedPath && fs.existsSync(rememberedPath)) {
-    return {
-      path: rememberedPath,
-      targetUrl: latestTimeoutSnapshot.targetUrl,
-      capturedAt: latestTimeoutSnapshot.capturedAt,
-    };
-  }
-
-  const snapshotDir = String(config.timeoutSnapshotDir || '').trim();
-  if (!snapshotDir || !fs.existsSync(snapshotDir)) {
-    return null;
-  }
-
-  const candidates = fs.readdirSync(snapshotDir)
-    .filter((name) => name.toLowerCase().endsWith('.png'))
-    .map((name) => {
-      const absolutePath = path.resolve(snapshotDir, name);
-      const stat = fs.statSync(absolutePath);
-      return {
-        path: absolutePath,
-        capturedAt: stat.mtimeMs || 0,
-      };
-    })
-    .sort((a, b) => b.capturedAt - a.capturedAt);
-
-  if (!candidates.length) {
-    return null;
-  }
-
-  const latest = candidates[0];
-  latestTimeoutSnapshot = {
-    path: latest.path,
-    targetUrl: '',
-    capturedAt: latest.capturedAt,
-  };
-
-  return {
-    path: latest.path,
-    targetUrl: '',
-    capturedAt: latest.capturedAt,
-  };
 }
 
 function clearClientMessageTimeout() {
@@ -966,51 +910,6 @@ if (process.argv.length > 2 && !toolModePayload) {
       clientMessageTimeoutMs: activeSession.timeoutMs || currentClientMessageTimeoutMs,
     }),
     submitCommand: (command) => commands.handle(command),
-    getDaemonState: () => ({
-      daemonId: session.daemonId,
-      clientId: session.clientId,
-      signalingServer: session.signalingServer,
-      browserLaunched: Boolean(browser.browser),
-      pageOpen: Boolean(browser.page),
-      targetPageOpen: browser.hasTargetPage(),
-      targetPage: browser.describeTargetPage(),
-      latestTimeoutSnapshot: getLatestTimeoutSnapshot(),
-      activeSession,
-      agentBridge: agentBridge.snapshot(),
-    }),
-    getSharePreflight: () => browser.getSharePreflightSnapshot(),
-    startSession: (payload) => startSessionWorkflow(payload),
-    getLatestSavedSnapshot: () => getLatestTimeoutSnapshot(),
-    enqueueAgentCommand: (type, payload) => {
-      if (type === 'set_session') {
-        if (typeof payload.daemonId === 'string' && payload.daemonId.trim()) {
-          session.daemonId = payload.daemonId.trim();
-        }
-        if (typeof payload.clientId === 'string' && payload.clientId.trim()) {
-          session.clientId = payload.clientId.trim();
-        }
-        if (typeof payload.signalingServer === 'string' && payload.signalingServer.trim()) {
-          session.signalingServer = payload.signalingServer.trim();
-        }
-        if (payload.stunUrls !== undefined) {
-          session.stunUrls = Array.isArray(payload.stunUrls)
-            ? payload.stunUrls.join(',')
-            : String(payload.stunUrls || '').trim();
-        }
-        if (payload.turnUrls !== undefined) {
-          session.turnUrls = Array.isArray(payload.turnUrls)
-            ? payload.turnUrls.join(',')
-            : String(payload.turnUrls || '').trim();
-        }
-        if (payload.turnUsername !== undefined) {
-          session.turnUsername = String(payload.turnUsername || '').trim();
-        }
-        if (payload.turnCredential !== undefined || payload.turnPassword !== undefined) {
-          session.turnCredential = String(payload.turnCredential ?? payload.turnPassword ?? '').trim();
-        }
-      }
-      return agentBridge.enqueue(type, payload);
-    },
     getAgentCommandsAfter: (after) => agentBridge.getCommandsAfter(after),
     onAgentEvent: async (event) => {
       const kind = String(event?.kind || '').trim();
@@ -1250,11 +1149,6 @@ if (process.argv.length > 2 && !toolModePayload) {
         return;
       }
       agentBridge.markSeen();
-    },
-    isAgentOnline: () => agentBridge.isOnline(10000),
-    bootstrapAgentBridge: async () => {
-      const targetUrl = `http://${openHost}:${config.staticServerPort}/daemon.html?uid=${encodeURIComponent(session.daemonId)}&remote=${encodeURIComponent(session.clientId)}&host=${encodeURIComponent(session.signalingServer)}`;
-      await commands.handle({ type: 'open_url', payload: { url: targetUrl } });
     },
   });
 

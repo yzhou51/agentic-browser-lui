@@ -2,13 +2,13 @@
 
 Node.js pnpm workspace for an agentic browser P2P system with two sub-projects:
 
-- `packages/daemon`: Daemon endpoint tooling, local CLI, daemon-side WebRTC page, and REST bridge for browser control.
+- `packages/daemon`: Daemon endpoint tooling, local CLI, and daemon-side WebRTC page for browser control.
 - `packages/client`: Client SDK and demo UI that receives daemon video stream and sends operation commands via data channel.
 
 ## Project Layout
 
 - `packages/daemon/public`: daemon control UI (`daemon.html`) and browser entrypoint (`daemon.js`).
-- `packages/daemon/src`: daemon CLI/server/runtime code, including REST endpoints.
+- `packages/daemon/src`: daemon CLI/server/runtime code.
 - `packages/client/src/sdk`: reusable client SDK pieces, including the main client wrapper and viewer/pointer helpers used by the demo.
 - `packages/client/src/demo`: demo UI wired on top of the SDK exports.
 
@@ -137,7 +137,6 @@ Use this when Chrome is already running with `--remote-debugging-port` enabled.
 4. Open client demo URL:
    - Default: `http://127.0.0.1:5174/mobile_client.html`
    - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
-   - Ensure `Daemon API URL` points to daemon static server (`http://localhost:8788`)
    - Click `Connect` and use controls to interact with the target
 
 ### Mode 2: Puppeteer (Auto-launch Chrome)
@@ -164,7 +163,6 @@ Use this when you want the daemon to launch Chrome automatically via Puppeteer.
 4. Open client demo URL:
    - Default: `http://127.0.0.1:5174/mobile_client.html`
    - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
-   - Ensure `Daemon API URL` points to daemon static server (`http://localhost:8788`)
    - Click `Connect` and use controls to interact with the target
 
 **Mode Behavior:**
@@ -262,7 +260,7 @@ sequenceDiagram
 
     loop User interaction session
         Client->>DaemonPage: Send mouse/keyboard/text commands (binary-encoded) over data channel
-        DaemonPage->>Daemon: Forward command to Puppeteer via REST bridge
+        DaemonPage->>Daemon: Forward command to Puppeteer via internal bridge
         Daemon->>Daemon: Replay command on controlled target page
         DaemonPage-->>Client: Send command_result over data channel
     end

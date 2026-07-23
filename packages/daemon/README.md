@@ -8,7 +8,7 @@ It provides:
 - Runtime config generation for the daemon control page from `.env`.
 - Static file hosting for `public/` so daemon page is opened over `http://`.
 - Browser daemon control page (`public/daemon.html`) that connects to OWT signaling server and exchanges data over `Owt.P2P.P2PClient`.
-- REST API endpoints for agent-driven daemon control (launch/open/share/close/exit).
+- CLI/tool-mode session control (launch Chrome, open target, connect, share, terminate).
 
 There is no daemon signaling API in this mode. The built-in static server only serves local frontend files.
 
@@ -136,135 +136,14 @@ The client sends lifecycle control messages over the OWT P2P data channel. Daemo
 
 When daemon processes any termination message, it immediately sets `intentionalDisconnect = true` before calling the async `disconnect()`. This prevents race conditions where the P2P client's internal reconnect logic could re-establish the signaling connection before the graceful shutdown completes.
 
-## REST API (Agent Workflow)
+## HTTP Endpoints
 
-Base URL defaults to `http://localhost:8788`.
+The daemon is driven by the CLI (see [Local CLI](#local-cli)); there is no external REST control API. The built-in static server exposes only what the daemon browser page needs:
 
-- `GET /api/v1/status`
-  - Returns daemon runtime state, browser status, and daemon bridge status.
-- `GET /api/v1/agent/ready`
-  - Returns whether daemon bridge is online.
-  - Use `?bootstrap=true` to auto-launch/open daemon and wait for bridge readiness.
-- `POST /api/v1/chrome/launch`
-  - Launches headful Chrome through Puppeteer.
-  - Body example:
-
-    ```json
-    {
-      "chrome": "/usr/bin/google-chrome",
-      "params": [
-        { "name": "--proxy-server", "value": "http://127.0.0.1:8888" },
-        { "name": "--other" },
-        { "name": "--bypass-proxy-list", "value": "localhost,127.0.0.1" }
-      ]
-    }
-    ```
-
-- `POST /api/v1/session/start`
-  - Unified session-start endpoint:
-    - Launch Chrome if not running.
-    - Open/re-open daemon page and target page.
-    - Connect daemon to signaling server.
-    - Wait for client connection and `resolve` message, or accept an early `finish` as terminal completion.
-    - Continue command replay over data channel after resolve.
-    - Arm timeout snapshot flow for this session.
-  - Body example:
-
-    ```json
-    {
-      "daemonId": "daemon-1",
-      "clientId": "client-1",
-      "targetUrl": "https://www.zhihu.com/signin?next=%2F",
-      "timeout": 120,
-      "sessionId": "session-001",
-      "signalingServer": "http://localhost:8095",
-      "stunUrls": "stun:example.com:3478",
-      "turnUrls": "turn:example.com:3478?transport=udp,turn:example.com:3478?transport=tcp",
-      "turnUsername": "username",
-      "turnCredential": "password",
-      "chrome": "",
-      "chromeParams": "[{\"name\":\"--proxy-server\",\"value\":\"http://127.0.0.1:8888\"}]"
-    }
-    ```
-
-- `POST /api/v1/page/open`
-  - Enqueues target open on daemon page.
-  - Body example:
-
-    ```json
-    {
-      "name": "zhihu",
-      "url": "https://www.zhihu.com/signin?next=%2F"
-    }
-    ```
-
-- `GET /api/v1/page/snapshot`
-  - Captures the current target page and returns `image/png` directly.
-  - If target page is already closed, daemon returns the most recently saved timeout snapshot when available.
-  - Optional query params:
-    - `fullPage=true` to capture full scrollable page.
-    - `clipX`, `clipY`, `clipWidth`, `clipHeight` to capture a specific region.
-
-- `POST /api/v1/page/snapshot`
-  - Same as GET, with options in JSON body.
-  - Body example:
-
-    ```json
-    {
-      "fullPage": true
-    }
-    ```
-
-- `POST /api/v1/action/connect`
-  - Primary Take Action flow: enqueue daemon session update, signaling connect-only, and client notification.
-  - Body example:
-
-    ```json
-    {
-      "daemonId": "daemon-1",
-      "clientId": "client-1",
-      "signalingServer": "${SIGNALING_SERVER}",
-      "stunUrls": "stun:example.com:3478",
-      "turnUrls": "turn:example.com:3478?transport=udp,turn:example.com:3478?transport=tcp",
-      "turnUsername": "username",
-      "turnCredential": "password",
-      "targetUrl": "https://www.zhihu.com/signin?next=%2F"
-    }
-    ```
-
-- `POST /api/v1/share/start`
-  - Legacy convenience flow: enqueues daemon connect + immediate share.
-  - Body example:
-
-    ```json
-    {
-      "daemonId": "daemon-1",
-      "clientId": "client-1"
-    }
-    ```
-
-- `POST /api/v1/share/stop`
-  - Stops active sharing by enqueueing a daemon disconnect.
-  - After stop completes, call `POST /api/v1/share/start` again to trigger a fresh share.
-- `GET /api/v1/share/preflight`
-  - Returns daemon-side share readiness diagnostics for automatic share.
-  - Includes runtime mode (`remote-devtools` or `putter`), browser connection mode (`launched` or `attached`), required flag checks, and warnings when auto-share reliability may be reduced.
-- `POST /api/v1/page/close`
-  - Enqueues target close on daemon page.
-- `POST /api/v1/chrome/exit`
-  - Exits Puppeteer-launched Chrome.
-
-Bridge endpoints used internally by daemon page:
-
-- `GET /api/v1/agent/commands?after=<id>`
-- `POST /api/v1/agent/events`
-
-Important:
-
-- `page/open`, `page/close`, `action/connect`, `share/start`, and `share/stop` require daemon page to be open and polling bridge commands.
-- This keeps screen-share and bridge-triggered control in the daemon browser context.
-
-Example curl sequence for the full agent flow is in `tests/scripts/daemon-rest-api-curl.sh`.
+- `GET /` and static assets under `public/` (serves `daemon.html`, `daemon.js`, vendored libs), plus browser modules under `/daemon-src/*` and client SDK under `/client-sdk/*`.
+- `GET /daemon.config.json` — runtime config (ids, signaling server, ICE, timeout) the page reads on load.
+- `POST /daemon.command` — page-issued local Puppeteer command bridge.
+- `GET /api/v1/agent/commands?after=<id>` and `POST /api/v1/agent/events` — internal bridge only: the page polls for commands the daemon enqueues and posts back resolve/finish/leave/heartbeat events. These are not a public control API.
 
 ## P2P Data Flow
 
@@ -274,7 +153,7 @@ Example curl sequence for the full agent flow is in `tests/scripts/daemon-rest-a
 
 ## Daemon Page Behavior
 
-- The page receives bridge commands from daemon REST (`/api/v1/agent/commands`) and executes them.
+- The page receives bridge commands from the daemon (`/api/v1/agent/commands`) and executes them.
 - Target open/close and command replay route to Puppeteer target control.
 
 ## Frontend Refactor
@@ -291,13 +170,12 @@ From this package folder:
 - `node src/index.js open --url https://example.com`
 - `node src/index.js close-page`
 - `node src/index.js exit-chrome`
-- `node src/index.js session-start --daemon-id daemon-1 --client-id client-1 --target-url https://example.com`
 
 Tool-mode CLI (awe-daemon):
 
 - `node src/index.js --daemon-id daemon-1 --client-id client-1 --target-url https://example.com`
 
-When started in tool mode, daemon records and updates `activeSession.stage` and `activeSession.status` in `GET /api/v1/status`.
+When started in tool mode, the daemon records and updates `activeSession.stage` and `activeSession.status` in-process and reports the final outcome in the JSON result printed on completion.
 
 ### Tool-mode flags
 
