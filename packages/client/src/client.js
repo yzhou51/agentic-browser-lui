@@ -412,6 +412,71 @@ async function init() {
     }
   }
 
+  // Overlay canvas that holds the last remote frame after the session ends (see
+  // freezeRemoteVideoFrame). Kept at module scope so it can be removed on reconnect.
+  let freezeFrameCanvas = null;
+
+  // Remove any frozen last-frame overlay and restore the live <video> element.
+  function clearFrozenFrame() {
+    if (freezeFrameCanvas) {
+      freezeFrameCanvas.remove();
+      freezeFrameCanvas = null;
+    }
+    if (el.remoteVideo) {
+      el.remoteVideo.style.display = '';
+    }
+  }
+
+  // On terminal events (finish/timeout) the daemon stops sharing and the client
+  // disconnects, which ends the WebRTC track and blanks the <video>. To keep the last
+  // rendered frame on screen, snapshot the current frame into a canvas and overlay it in
+  // place of the video (the poster attribute is unreliable -- Chrome won't repaint a
+  // poster once the element has already rendered frames). applyViewScale() always writes
+  // the video's box geometry inline, so copying its style.cssText (plus object-fit:contain,
+  // matching the <video>) reproduces the identical rendered box, including zoom/scroll
+  // scaling. The live video is then hidden beneath the frozen canvas. Returns true if a
+  // frame was captured.
+  function freezeRemoteVideoFrame() {
+    // Idempotent: a session ends via two paths (Finish button and the daemon's
+    // finish_ack/timeout_notice). The first to run captures the live frame; a later call
+    // must keep that frame rather than clobber it (by then the track is gone and a
+    // re-capture would be blank).
+    if (freezeFrameCanvas) {
+      return true;
+    }
+
+    const video = el.remoteVideo;
+    if (!video || !video.videoWidth || !video.videoHeight || !video.parentNode) {
+      return false;
+    }
+
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.id = 'remoteVideoFreeze';
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        return false;
+      }
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      canvas.style.cssText = video.style.cssText;
+      canvas.style.display = 'block';
+      canvas.style.objectFit = 'contain';
+      canvas.style.borderRadius = '12px';
+
+      video.parentNode.insertBefore(canvas, video.nextSibling);
+      video.style.display = 'none';
+      freezeFrameCanvas = canvas;
+      log(`Froze last remote frame (${canvas.width}x${canvas.height}).`);
+      return true;
+    } catch (error) {
+      log(`Failed to freeze last remote frame: ${error?.message || error}`);
+      return false;
+    }
+  }
+
   async function detectCalibrationMarkers(markers, { saveDebugFrame = false } = {}) {
     const video = el.remoteVideo;
     if (!video || !video.videoWidth || !video.videoHeight) {
@@ -1124,6 +1189,10 @@ async function init() {
       el.remoteVideo.playsInline = true;
       el.remoteVideo.muted = true;
 
+      // Drop any frozen last-frame overlay from a prior session and restore the live
+      // video before attaching the new stream.
+      clearFrozenFrame();
+
       if (el.remoteVideo.srcObject !== mediaStream) {
         el.remoteVideo.srcObject = mediaStream;
       }
@@ -1363,6 +1432,11 @@ async function init() {
         showTerminalNotice(isFinish ? 'active' : 'error', noticeMessage);
         setClientState('daemonDisconnected', noticeMessage);
         log(`${parsed.type} received: ${noticeMessage}`);
+
+        // Preserve the last frame before tearing down the stream, so the view does not
+        // blank out on session end. Capture must happen while the track is still live;
+        // the overlay canvas then covers the (about-to-end) video.
+        freezeRemoteVideoFrame();
 
         stopSessionCountdown();
         void ducClient.disconnect().catch(() => {});
@@ -2003,6 +2077,10 @@ async function init() {
         await sendFinishMessage('button_click');
         setClientState('daemonInteraction', `Finish sent to daemon "${getDaemonId()}".`);
         log(`Finish sent to daemon "${getDaemonId()}".`);
+
+        // Preserve the last frame before disconnecting -- the capture must happen while
+        // the track is still live, so it runs here rather than only in the finish_ack path.
+        freezeRemoteVideoFrame();
 
         // Finish delivered: proactively disconnect from the OWT signaling server
         // instead of waiting for the daemon's finish_ack (which may not arrive
