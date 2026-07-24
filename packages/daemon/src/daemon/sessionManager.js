@@ -33,7 +33,7 @@ export class SessionManager {
     // before actually terminating the session (close).
     this.pendingLeaveHandle = null;
     this.pendingLeaveClientId = '';
-    this.currentClientMessageTimeoutMs = Number(config.clientMessageTimeoutMs || 120000);
+    this.currentDaemonTimeoutMs = Number(config.daemonTimeoutMs || 120000);
 
     this.snapshots = [];
     this.readyWaiters = [];
@@ -44,7 +44,7 @@ export class SessionManager {
       daemonId: '',
       clientId: '',
       targetUrl: '',
-      timeoutMs: this.currentClientMessageTimeoutMs,
+      timeoutMs: this.currentDaemonTimeoutMs,
       stage: SESSION_STAGES.START,
       status: 'idle',
       statusMessage: '',
@@ -448,8 +448,8 @@ export class SessionManager {
 
   armClientMessageTimeout(reason = 'init', timeoutMsOverride = null) {
     this.clearClientMessageTimeout();
-    const timeoutMs = Number(timeoutMsOverride || this.currentClientMessageTimeoutMs || this.config.clientMessageTimeoutMs || 120000);
-    this.currentClientMessageTimeoutMs = timeoutMs;
+    const timeoutMs = Number(timeoutMsOverride || this.currentDaemonTimeoutMs || this.config.daemonTimeoutMs || 120000);
+    this.currentDaemonTimeoutMs = timeoutMs;
     this.clientMessageTimeoutHandle = setTimeout(async () => {
       this.clientMessageTimeoutHandle = null;
 

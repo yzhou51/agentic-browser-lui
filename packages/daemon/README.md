@@ -45,13 +45,11 @@ The same static server also exposes browser modules from `src/daemon/` under `/d
 `src/config.js` loads values from `.env` automatically.
 
 - `SIGNALING_SERVER` (default: `${SIGNALING_SERVER}`)
-- `DAEMON_ID` (default: `daemon-1`)
-- `CLIENT_ID` (default: `client-1`)
 - `DAEMON_STATIC_HOST` (default: `0.0.0.0`)
 - `DAEMON_STATIC_PORT` (default: `8788`)
 - `DAEMON_LOG_LEVEL` (default: `info`, options: `debug`, `info`, `warn`, `error`, `silent`)
 - `DAEMON_LOG_FILE` (default: `/var/log/agent-browser-daemon.log`)
-- `DAEMON_CLIENT_MESSAGE_TIMEOUT_SECONDS` (default: `120`)
+- `DAEMON_TIMEOUT_SECONDS` (default: `120`)
 - `DAEMON_TIMEOUT_SNAPSHOT_DIR` (default: `log/snapshots` under daemon package)
 - `BROWSER_HEADLESS` (default: `false`)
 - `PUPPETEER_BROWSER_CHANNEL` (default: `chrome`)

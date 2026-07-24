@@ -35,7 +35,7 @@ const commands = new CommandProcessor(browserCtrl);
 const daemonPageBridge = new DaemonPageBridge({
   initialState: {
     daemonId: config.daemonId,
-    clientId: config.defaultClientId,
+    clientId: config.clientId,
     signalingServer: config.signalingServer,
     stunUrls: config.stunUrls,
     turnUrls: config.turnUrls,
@@ -48,7 +48,7 @@ const daemonPageBridge = new DaemonPageBridge({
 // state, which is owned by SessionManager (see sessionManager.activeSession).
 const session = {
   daemonId: config.daemonId,
-  clientId: config.defaultClientId,
+  clientId: config.clientId,
   signalingServer: config.signalingServer,
   stunUrls: config.stunUrls,
   turnUrls: config.turnUrls,
@@ -95,7 +95,7 @@ async function startSessionWorkflow(payload = {}) {
   }
 
   const sessionId = requestedSessionId || createSessionId();
-  const timeoutSeconds = parseTimeoutSeconds(payload.timeout, Math.max(1, Math.floor((config.clientMessageTimeoutMs || 120000) / 1000)));
+  const timeoutSeconds = parseTimeoutSeconds(payload.timeout, Math.max(1, Math.floor((config.daemonTimeoutMs || 120000) / 1000)));
   const timeoutMs = timeoutSeconds * 1000;
   // daemon.html is the sole daemon-side control page.
   const daemonPageName = 'daemon.html';
@@ -295,10 +295,10 @@ if (process.argv.length > 2 && !toolModePayload) {
       browserConnectionMode: browserCtrl.browserConnectionMode,
       // Prefer the active session's timeout: it is assigned early in
       // startSessionWorkflow (before the daemon page is opened and fetches
-      // this config), whereas currentClientMessageTimeoutMs is only armed later.
-      // Reading currentClientMessageTimeoutMs here would return the default
+      // this config), whereas currentDaemonTimeoutMs is only armed later.
+      // Reading currentDaemonTimeoutMs here would return the default
       // (e.g. 120s) instead of the session's --timeout value (e.g. 300s).
-      clientMessageTimeoutMs: activeSession.timeoutMs || sessionManager.currentClientMessageTimeoutMs,
+      daemonTimeoutMs: activeSession.timeoutMs || sessionManager.currentDaemonTimeoutMs,
     }),
     submitCommand: (command) => commands.handle(command),
     getDaemonPageCommands: (after) => daemonPageBridge.getCommandsAfter(after),
@@ -386,10 +386,10 @@ if (process.argv.length > 2 && !toolModePayload) {
             activeSession.connected = true;
             activeSession.connectedAt = Date.now();
           }
-          sessionManager.armClientMessageTimeout('peer_message', sessionManager.currentClientMessageTimeoutMs);
+          sessionManager.armClientMessageTimeout('peer_message', sessionManager.currentDaemonTimeoutMs);
           logger.debug('Client message timeout reset from peer message.', {
             origin: messageOrigin,
-            timeoutMs: sessionManager.currentClientMessageTimeoutMs,
+            timeoutMs: sessionManager.currentDaemonTimeoutMs,
           });
         }
 

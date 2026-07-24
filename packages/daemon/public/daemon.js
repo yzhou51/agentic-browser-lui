@@ -325,7 +325,7 @@ async function loadRuntimeConfig() {
       return;
     }
 
-    const timeoutMs = Number(runtimeConfig?.clientMessageTimeoutMs) || 0;
+    const timeoutMs = Number(runtimeConfig?.daemonTimeoutMs) || 0;
 
     await sendPeerMessage(
       clientId,

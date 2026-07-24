@@ -10,7 +10,7 @@ Client subproject includes:
 
 - Create env file for demo defaults:
   - PowerShell: `Copy-Item .env.example .env`
-  - Edit `SIGNALING_SERVER`, `CLIENT_ID`, `DAEMON_ID`, and optional STUN/TURN values in `.env` if needed.
+  - Edit `SIGNALING_SERVER` and optional STUN/TURN values in `.env` if needed.
 - `pnpm dev`
 
 From workspace root, equivalent command is `pnpm dev:client`.
@@ -33,8 +33,6 @@ Default static server listen host is `0.0.0.0`, default port is `5174`.
 Environment values used by static mode:
 
 - `SIGNALING_SERVER` (default: `http://localhost:8095`)
-- `CLIENT_ID` (default: `client-1`)
-- `DAEMON_ID` (default: `daemon-1`)
 - `STUN_SERVER_URLS` (comma/newline separated, optional)
 - `TURN_SERVER_URLS` (comma/newline separated, optional)
 - `TURN_USERNAME` (optional)
