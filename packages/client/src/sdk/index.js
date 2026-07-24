@@ -1,4 +1,4 @@
-export { AgenticBrowserClient } from './AgenticBrowserClient.js';
+export { DirectUserControlClient } from './DirectUserControlClient.js';
 
 // Input: coordinate mapping, mouse buttons, payload building/sending, binary codec.
 export {

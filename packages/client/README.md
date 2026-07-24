@@ -2,9 +2,9 @@
 
 Client subproject includes:
 
-- SDK: `src/sdk/AgenticBrowserClient.js`
+- SDK: `src/sdk/DirectUserControlClient.js`
 - Viewer helpers: `src/sdk/viewerUtils.js`
-- Demo UI: `public/client.html`, with logic in `src/client.js`
+- Demo UI: `public/direct-user-control.html`, with logic in `src/client.js`
 
 ## Dev
 
@@ -21,12 +21,12 @@ From workspace root, equivalent command is `pnpm dev:client`.
 
 From workspace root, equivalent command is `pnpm start:client`.
 
-This starts a local static server for this package and prints an `http://.../client.html` URL.
+This starts a local static server for this package and prints an `http://.../direct-user-control.html` URL.
 Runtime defaults are generated from `.env` into `client.runtime.json`.
 
 Pages:
 
-- `public/client.html`: client page with dedicated keyboard-launch button and a Finish action pinned at the opposite bottom corner.
+- `public/direct-user-control.html`: client page with dedicated keyboard-launch button and a Finish action pinned at the opposite bottom corner.
 
 Default static server listen host is `0.0.0.0`, default port is `5174`.
 
@@ -51,9 +51,9 @@ Environment values used by static mode:
 ## SDK quick usage
 
 ```js
-import { AgenticBrowserClient } from './src/sdk/index.js';
+import { DirectUserControlClient } from './src/sdk/index.js';
 
-const client = new AgenticBrowserClient();
+const client = new DirectUserControlClient();
 await client.connect({
   signalingHost: 'http://localhost:8095',
   clientId: 'client-1',
@@ -70,7 +70,7 @@ await client.sendCommand('open_url', { url: 'https://example.com' });
 
 `src/sdk/index.js` re-exports:
 
-- `AgenticBrowserClient`
+- `DirectUserControlClient`
 - `getRenderedVideoContentRect`
 - `mapPointerToVideoSpace`
 - `getPointerButtonName`
@@ -86,4 +86,4 @@ These helpers were extracted from the demo so other client UIs can reuse the sam
 - Static mode serves vendored browser dependencies locally, including `public/vendor/socket.io.min.js`, to avoid CDN dependencies during signaling setup.
 - The client page (`src/demo/client.js`) adds an explicit `Open Keyboard` button for phone text input and a `Finish` action.
 - STUN/TURN fields default from `.env` and can be generated into `client.runtime.json`.
-- Mobile status chip in `public/client.html` is hidden by default for customer-facing demos and can be re-enabled for debugging by adding `debug-status` class to `body`.
+- Mobile status chip in `public/direct-user-control.html` is hidden by default for customer-facing demos and can be re-enabled for debugging by adding `debug-status` class to `body`.

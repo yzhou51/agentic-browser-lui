@@ -1,6 +1,6 @@
 /* global Owt */
 
-import { AgenticBrowserClient } from '/client-sdk/AgenticBrowserClient.js';
+import { DirectUserControlClient } from '/client-sdk/DirectUserControlClient.js';
 import { decodeMouseCommand } from '/client-sdk/input/mouseCommandCodec.js';
 
 async function loadRuntimeConfig() {
@@ -148,7 +148,7 @@ async function loadRuntimeConfig() {
   }
 
   async function sendPeerMessage(targetId, message, options) {
-    return p2pClient.sendPeerMessage(targetId, message, options);
+    return ducClient.sendPeerMessage(targetId, message, options);
   }
 
   async function requestCalibrationFromClient(clientId, attempt, { settleDelayMs = 0 } = {}) {
@@ -272,7 +272,7 @@ async function loadRuntimeConfig() {
   }
 
   async function announceDaemonOnline(reason = 'interval') {
-    if (resolveSeen || !p2pClient.isConnected()) {
+    if (resolveSeen || !ducClient.isConnected()) {
       return;
     }
 
@@ -400,7 +400,7 @@ async function loadRuntimeConfig() {
     const clientId = String(remoteInput?.value || '').trim();
     const signalingHost = String(hostInput?.value || '').trim();
 
-    return p2pClient.connect({
+    return ducClient.connect({
       signalingHost,
       clientId: daemonId,
       daemonId: clientId,
@@ -413,11 +413,11 @@ async function loadRuntimeConfig() {
   }
 
   async function ensureConnected() {
-    return p2pClient.ensureConnected();
+    return ducClient.ensureConnected();
   }
 
   async function shareScreen({ automated = false } = {}) {
-    if (!p2pClient.getClient()) {
+    if (!ducClient.getClient()) {
       setStatus('Connect first.');
       return;
     }
@@ -462,7 +462,7 @@ async function loadRuntimeConfig() {
       new Owt.Base.StreamSourceInfo('screen-cast', 'screen-cast')
     );
 
-    const p2p = p2pClient.getClient();
+    const p2p = ducClient.getClient();
     const publishTargetId = String(remoteInput?.value || '').trim();
     if (!publishTargetId) {
       throw new Error('clientId is required before share publish.');
@@ -499,7 +499,7 @@ async function loadRuntimeConfig() {
       screenStream = null;
     }
 
-    await p2pClient.disconnect();
+    await ducClient.disconnect();
 
     setStatus('Disconnected.');
     await postAgentEvent({
@@ -660,9 +660,9 @@ async function loadRuntimeConfig() {
     }
   }
 
-  const p2pClient = new AgenticBrowserClient();
+  const ducClient = new DirectUserControlClient();
 
-  p2pClient.onDisconnect = () => {
+  ducClient.onDisconnect = () => {
     const daemonId = String(uidInput?.value || '').trim();
     const clientId = String(remoteInput?.value || '').trim();
     const signalingServer = String(hostInput?.value || '').trim();
@@ -717,7 +717,7 @@ async function loadRuntimeConfig() {
       }
   }
 
-  p2pClient.onMessage = (event) => {
+  ducClient.onMessage = (event) => {
     inboundMessageQueue = inboundMessageQueue
       .then(() => handleIncomingPeerMessage(event))
       .catch((error) => {
@@ -726,11 +726,11 @@ async function loadRuntimeConfig() {
     return inboundMessageQueue;
   };
 
-  p2pClient.onSignalingConnected = async ({ host }) => {
+  ducClient.onSignalingConnected = async ({ host }) => {
     const daemonId = String(uidInput?.value || '').trim();
     const clientId = String(remoteInput?.value || '').trim();
     const signalingServer = String(host || hostInput?.value || '').trim();
-    const allowedRemoteIds = p2pClient.getAllowedRemoteIds();
+    const allowedRemoteIds = ducClient.getAllowedRemoteIds();
     setStatus(`Connected as ${daemonId}. Waiting for ${clientId} messages.`);
     appendMessage(`connected to signaling: daemon=${daemonId} client=${clientId} host=${signalingServer}`);
     await postAgentEvent({
@@ -746,11 +746,11 @@ async function loadRuntimeConfig() {
     startDaemonOnlineAnnouncements();
   };
 
-  p2pClient.onReconnectAttempt = () => {
+  ducClient.onReconnectAttempt = () => {
     appendMessage('ensureConnected: stale signaling session detected, reconnecting.');
   };
 
-  p2pClient.onRetrySend = ({ label, errorMessage }) => {
+  ducClient.onRetrySend = ({ label, errorMessage }) => {
     appendMessage(`[data-channel] retrying ${label}: ${errorMessage}`);
   };
 
@@ -926,7 +926,7 @@ async function loadRuntimeConfig() {
         daemonId: String(uidInput?.value || '').trim(),
         clientId: String(remoteInput?.value || '').trim(),
         signalingServer: String(hostInput?.value || '').trim(),
-        connected: p2pClient.isConnected(),
+        connected: ducClient.isConnected(),
         sharing: Boolean(screenStream),
         controlTargetMode,
       },

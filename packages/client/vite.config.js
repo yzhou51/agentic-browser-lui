@@ -38,7 +38,7 @@ export default defineConfig({
   build: {
     rollupOptions: {
       input: {
-        client: path.resolve(__dirname, 'public/client.html'),
+        client: path.resolve(__dirname, 'public/direct-user-control.html'),
       },
     },
   },

@@ -2,7 +2,7 @@ import { normalizeRtcIceOptions } from './config/rtcConfig.js';
 import { createOwtP2PTransport } from './transport/owtP2PTransport.js';
 import { SIGNALING_MESSAGE_TYPES, resolveMessageType } from './transport/signalingMessages.js';
 
-export class AgenticBrowserClient {
+export class DirectUserControlClient {
   // Session identity + caller-supplied event callbacks (the public event API).
   clientId = null;
   daemonId = null;

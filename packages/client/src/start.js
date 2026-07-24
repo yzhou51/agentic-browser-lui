@@ -39,11 +39,11 @@ const MIME_TYPES = {
 
 function resolveSafePath(reqPath) {
   const rawPath = decodeURIComponent(reqPath.split('?')[0]);
-  const normalized = rawPath === '/' ? '/client.html' : rawPath;
+  const normalized = rawPath === '/' ? '/direct-user-control.html' : rawPath;
   const relative = normalized.replace(/^\/+/, '');
   const isPublicAsset =
     relative.startsWith('vendor/') ||
-    relative === 'client.html';
+    relative === 'direct-user-control.html';
   const baseDir = isPublicAsset ? path.resolve(rootDir, 'public') : rootDir;
   const candidate = path.resolve(baseDir, relative);
   if (!candidate.startsWith(path.resolve(baseDir))) {
@@ -104,7 +104,7 @@ server.on('error', (error) => {
 
 server.listen(staticPort, staticHost, () => {
   console.log(`Client static server running: http://${staticHost}:${staticPort}`);
-  console.log(`Open demo page: http://${publicHost}:${staticPort}/client.html`);
+  console.log(`Open demo page: http://${publicHost}:${staticPort}/direct-user-control.html`);
 });
 
 let shuttingDown = false;

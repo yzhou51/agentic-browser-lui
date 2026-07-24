@@ -135,7 +135,7 @@ Use this when Chrome is already running with `--remote-debugging-port` enabled.
    ```
 
 4. Open client URL:
-   - Default: `http://127.0.0.1:5174/client.html`
+   - Default: `http://127.0.0.1:5174/direct-user-control.html`
    - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
    - Click `Connect` and use controls to interact with the target
 
@@ -161,7 +161,7 @@ Use this when you want the daemon to launch Chrome automatically via Puppeteer.
 3. Daemon automatically launches Chrome, opens daemon page, and opens target page
 
 4. Open client URL:
-   - Default: `http://127.0.0.1:5174/client.html`
+   - Default: `http://127.0.0.1:5174/direct-user-control.html`
    - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
    - Click `Connect` and use controls to interact with the target
 

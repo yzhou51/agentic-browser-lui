@@ -1,5 +1,5 @@
 import {
-  AgenticBrowserClient,
+  DirectUserControlClient,
   createPeerIds,
   createViewerMouseCommandSender,
   hasAnySearchParam,
@@ -15,7 +15,7 @@ import { normalizeRtcIceOptions, parseRtcIceServersJson } from './sdk/config/rtc
 async function init() {
   const runtimeConfig = await loadClientRuntimeConfig('/client.runtime.json');
   const searchParams = new URLSearchParams(window.location.search);
-  const client = new AgenticBrowserClient();
+  const ducClient = new DirectUserControlClient();
   let connected = false;
   let isMousePressed = false;
   let activePointerId = null;
@@ -178,7 +178,7 @@ async function init() {
     }
 
     leaveSent = true;
-    client.setDaemonId(daemonId);
+    ducClient.setDaemonId(daemonId);
     const leaveMessage = {
       type: 'leave',
       requestId: `leave-${Date.now()}`,
@@ -191,7 +191,7 @@ async function init() {
     try {
       console.log('[client] sending leave message', { reason, daemonId });
       await Promise.race([
-        client.sendMessage(leaveMessage, daemonId),
+        ducClient.sendMessage(leaveMessage, daemonId),
         new Promise(resolve => setTimeout(resolve, 500)), // Max wait 500ms
       ]);
       console.log('[client] leave message sent', { reason });
@@ -209,8 +209,8 @@ async function init() {
       throw new Error('not connected to daemon.');
     }
 
-    client.setDaemonId(daemonId);
-    await client.sendMessage(
+    ducClient.setDaemonId(daemonId);
+    await ducClient.sendMessage(
       {
         type: 'finish',
         requestId: `finish-${Date.now()}`,
@@ -275,7 +275,7 @@ async function init() {
     return `${minutes}:${String(seconds).padStart(2, '0')}`;
   }
 
-  function renderCountdown() {
+  function renderCountdown(state) {
     if (!el.timeoutCountdown) {
       return;
     }
@@ -285,11 +285,12 @@ async function init() {
     }
     const remaining = Math.max(0, countdownDeadline - Date.now());
     const totalSeconds = Math.ceil(remaining / 1000);
-    let state = 'ok';
-    if (totalSeconds <= 10) {
-      state = 'urgent';
-    } else if (totalSeconds <= 30) {
-      state = 'warn';
+    if (!state) {
+      if (totalSeconds <= 10) {
+        state = 'urgent';
+      } else if (totalSeconds <= 30) {
+        state = 'warn';
+      }
     }
     el.timeoutCountdown.hidden = false;
     el.timeoutCountdown.dataset.state = state;
@@ -301,13 +302,14 @@ async function init() {
       window.clearInterval(countdownTimer);
       countdownTimer = null;
     }
-    sessionTimeoutMs = 0;
+
     countdownDeadline = 0;
-    if (el.timeoutCountdown) {
-      el.timeoutCountdown.hidden = true;
-      el.timeoutCountdown.dataset.state = 'idle';
-      el.timeoutCountdown.textContent = '';
-    }
+    renderCountdown('ok');
+    //if (el.timeoutCountdown) {
+    //  el.timeoutCountdown.hidden = true;
+    //  el.timeoutCountdown.dataset.state = 'idle';
+    //  el.timeoutCountdown.textContent = '';
+   // }
   }
 
   // Show a little less than the true daemon timeout so the countdown reaches
@@ -330,16 +332,6 @@ async function init() {
     if (!countdownTimer) {
       countdownTimer = window.setInterval(renderCountdown, 500);
     }
-    renderCountdown();
-  }
-
-  // Reset the visible countdown, mirroring the daemon resetting its
-  // client-message timeout whenever it receives a peer message from us.
-  function noteUserActivity() {
-    if (!sessionTimeoutMs) {
-      return;
-    }
-    countdownDeadline = Date.now() + sessionTimeoutMs;
     renderCountdown();
   }
 
@@ -368,7 +360,7 @@ async function init() {
     setClientState('daemonConnecting', `Sending Resolve to daemon "${getDaemonId()}" (attempt ${resolveAttempts})...`);
     log(`Resolve send requested (${reason}) attempt ${resolveAttempts}: ${JSON.stringify(resolveMessage)}`);
 
-    void client.sendMessage(resolveMessage)
+    void ducClient.sendMessage(resolveMessage)
       .then(() => {
         setClientState('daemonConnecting', `Resolve sent to daemon "${getDaemonId()}". Waiting for response...`);
         log(`Resolve sent to daemon "${getDaemonId()}".`);
@@ -1069,8 +1061,7 @@ async function init() {
       return;
     }
 
-    noteUserActivity();
-    const requestId = await client.sendCommand('text_input', { text });
+    const requestId = await ducClient.sendCommand('text_input', { text });
     log(`text_input sent (${requestId}): ${JSON.stringify(text)}`);
   }
 
@@ -1080,8 +1071,7 @@ async function init() {
       return;
     }
 
-    noteUserActivity();
-    const requestId = await client.sendCommand('key_press', { key });
+    const requestId = await ducClient.sendCommand('key_press', { key });
     log(`key_press sent (${requestId}): ${key}`);
   }
 
@@ -1091,8 +1081,8 @@ async function init() {
         log(`Skip ${type}: remote stream is not ready.`);
         return `skipped-${type}-${Date.now()}`;
       }
-      noteUserActivity();
-      return client.sendCommand(type, payload);
+
+      return ducClient.sendCommand(type, payload);
     },
     videoElement: el.remoteVideo,
     getIsDragging: () => isMousePressed,
@@ -1122,7 +1112,7 @@ async function init() {
     },
   });
 
-  client.onRemoteStream = (stream) => {
+  ducClient.onRemoteStream = (stream) => {
     const mediaStream =
       (stream?.mediaStream instanceof MediaStream)
         ? stream.mediaStream
@@ -1148,7 +1138,7 @@ async function init() {
     log('Remote stream event received without mediaStream.');
   };
 
-  client.onSignalingConnected = ({ uid, host }) => {
+  ducClient.onSignalingConnected = ({ uid, host }) => {
     log(`Signaling authenticated as "${uid}" via "${host}".`);
   };
 
@@ -1254,7 +1244,7 @@ async function init() {
     el.keyboardFab.classList.remove('is-dragging');
   });
 
-  client.onDisconnect = () => {
+  ducClient.onDisconnect = () => {
     connected = false;
     messageChannelReady = false;
     daemonReadyHint = false;
@@ -1270,7 +1260,7 @@ async function init() {
     log('Disconnected from signaling server.');
   };
 
-  client.onMessage = ({ origin, message }) => {
+  ducClient.onMessage = ({ origin, message }) => {
     try {
       const rawMessage =
         message && typeof message === 'object'
@@ -1282,7 +1272,7 @@ async function init() {
       if (parsed.type === 'daemon_online') {
         const daemonId = String(parsed?.payload?.daemonId || getDaemonId()).trim();
         if (daemonId) {
-          client.setDaemonId(daemonId);
+          ducClient.setDaemonId(daemonId);
         }
         daemonReadyHint = true;
         startSessionCountdown(parsed?.payload?.timeoutMs);
@@ -1329,7 +1319,7 @@ async function init() {
             }
 
             try {
-              await client.sendMessage({
+              await ducClient.sendMessage({
                 type: 'calibrate_result',
                 requestId: parsed.requestId,
                 payload: detection,
@@ -1374,7 +1364,7 @@ async function init() {
         log(`${parsed.type} received: ${noticeMessage}`);
 
         stopSessionCountdown();
-        void client.disconnect().catch(() => {});
+        void ducClient.disconnect().catch(() => {});
         connected = false;
         leaveSent = false;
         resolveSent = false;
@@ -2012,6 +2002,18 @@ async function init() {
         await sendFinishMessage('button_click');
         setClientState('daemonInteraction', `Finish sent to daemon "${getDaemonId()}".`);
         log(`Finish sent to daemon "${getDaemonId()}".`);
+
+        // Finish delivered: proactively disconnect from the OWT signaling server
+        // instead of waiting for the daemon's finish_ack (which may not arrive
+        // before teardown). Mirrors the finish_ack/timeout_notice teardown below.
+        void ducClient.disconnect().catch(() => {});
+        connected = false;
+        leaveSent = false;
+        resolveSent = false;
+        resolveAcked = false;
+        resolveAttempts = 0;
+        resolveInFlight = false;
+        clearResolveRetryTimer();
       } catch (error) {
         setClientState('daemonDisconnected', `Finish failed: ${error.message}`);
         log(`Finish failed: ${error.message}`);
@@ -2044,7 +2046,7 @@ async function init() {
       ...summarizeIceConfigForLog(rtcOptions),
     });
 
-    client.connect({
+    ducClient.connect({
       signalingHost: getSignalingUrl(),
       clientId: getClientId(),
       daemonId: getDaemonId(),
