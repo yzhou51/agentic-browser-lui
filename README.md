@@ -1,16 +1,16 @@
-# agentic-browser-lui
+# Direct User Control
 
-Node.js pnpm workspace for an agentic browser P2P system with two sub-projects:
+Node.js pnpm workspace for an agentic native browser P2P system with two sub-projects:
 
 - `packages/daemon`: Daemon endpoint tooling, local CLI, and daemon-side WebRTC page for browser control.
-- `packages/client`: Client SDK and demo UI that receives daemon video stream and sends operation commands via data channel.
+- `packages/client`: Client SDK and UI that receives daemon video stream and sends operation commands via data channel.
 
 ## Project Layout
 
 - `packages/daemon/public`: daemon control UI (`daemon.html`) and browser entrypoint (`daemon.js`).
 - `packages/daemon/src`: daemon CLI/server/runtime code.
-- `packages/client/src/sdk`: reusable client SDK pieces, including the main client wrapper and viewer/pointer helpers used by the demo.
-- `packages/client/src/demo`: demo UI wired on top of the SDK exports.
+- `packages/client/src/sdk`: reusable client SDK pieces, including the main client wrapper and viewer/pointer helpers used by the UI.
+- `packages/client/src`: UI wired on top of the SDK exports.
 
 ## Prerequisites
 
@@ -119,7 +119,7 @@ Use this when Chrome is already running with `--remote-debugging-port` enabled.
      --auto-select-desktop-capture-source
    ```
 
-2. Start client demo static server:
+2. Start client static server:
    ```bash
    pnpm start:client
    ```
@@ -134,7 +134,7 @@ Use this when Chrome is already running with `--remote-debugging-port` enabled.
      --targetUrl http://localhost:5174/target-demo.html
    ```
 
-4. Open client demo URL:
+4. Open client URL:
    - Default: `http://127.0.0.1:5174/client.html`
    - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
    - Click `Connect` and use controls to interact with the target
@@ -144,7 +144,7 @@ Use this when Chrome is already running with `--remote-debugging-port` enabled.
 Use this when you want the daemon to launch Chrome automatically via Puppeteer.
 
 **Setup:**
-1. Start client demo static server:
+1. Start client static server:
    ```bash
    pnpm start:client
    ```
@@ -160,7 +160,7 @@ Use this when you want the daemon to launch Chrome automatically via Puppeteer.
 
 3. Daemon automatically launches Chrome, opens daemon page, and opens target page
 
-4. Open client demo URL:
+4. Open client URL:
    - Default: `http://127.0.0.1:5174/client.html`
    - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
    - Click `Connect` and use controls to interact with the target
@@ -294,7 +294,7 @@ sequenceDiagram
 - Signaling logic in daemon peer page and client follows `peercall.js`/`sc.websocket.js` pattern (`authentication`, `owt-message`, reconnect handling).
 - OWT SDK in this workspace is loaded from vendored browser files at `packages/client/public/vendor/owt.js` and `packages/daemon/public/vendor/owt.js`.
 - Socket.IO is also vendored locally in both daemon and client public assets so signaling does not depend on a CDN-hosted global `io` script.
-- Daemon and client both provide local static file servers to host demo pages over `http://`.
+- Daemon and client both provide local static file servers to host pages over `http://`.
 - Automatic web page capture without user prompt depends on browser/OS policies; this scaffold includes the full data and signaling path and supports manual screen selection.
 - Client mouse coordinates are scaled from rendered video size to source stream resolution before sending `mouse_move` and `mouse_click` commands.
 - Optional smoke test: `pnpm test:signal` uses a root-level Node `socket.io-client` dependency to verify signaling auth and `owt-message` relay.

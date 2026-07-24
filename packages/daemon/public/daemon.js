@@ -110,7 +110,7 @@ async function loadRuntimeConfig() {
 
   async function postAgentEvent(payload) {
     try {
-      await fetch('/api/v1/agent/events', {
+      await fetch('/api/v1/page/events', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -866,7 +866,7 @@ async function loadRuntimeConfig() {
 
     pollingAgentCommands = true;
     try {
-      const response = await fetch(`/api/v1/agent/commands?after=${encodeURIComponent(agentCommandCursor)}`, {
+      const response = await fetch(`/api/v1/page/commands?after=${encodeURIComponent(agentCommandCursor)}`, {
         cache: 'no-store',
       });
       if (!response.ok) {

@@ -1,4 +1,4 @@
-export class AgentControlBridge {
+export class DaemonPageBridge {
   constructor({ initialState = {} } = {}) {
     this.nextCommandId = 1;
     this.commandLog = [];

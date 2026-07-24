@@ -94,8 +94,8 @@ export function startStaticServer({
   port,
   getDaemonConfig,
   submitCommand,
-  getAgentCommandsAfter,
-  onAgentEvent,
+  getDaemonPageCommands,
+  onDaemonPageEvent,
 }) {
 
   const server = http.createServer((req, res) => {
@@ -138,11 +138,11 @@ export function startStaticServer({
       return;
     }
 
-    if (req.url.startsWith('/api/v1/agent/commands') && req.method === 'GET') {
+    if (req.url.startsWith('/api/v1/page/commands') && req.method === 'GET') {
       withCorsHeaders(res);
       const url = new URL(req.url, 'http://localhost');
       const after = Number(url.searchParams.get('after') || 0);
-      const data = getAgentCommandsAfter(after);
+      const data = getDaemonPageCommands(after);
       writeJson(res, 200, {
         ok: true,
         ...data,
@@ -150,11 +150,11 @@ export function startStaticServer({
       return;
     }
 
-    if (req.url === '/api/v1/agent/events' && req.method === 'POST') {
+    if (req.url === '/api/v1/page/events' && req.method === 'POST') {
       withCorsHeaders(res);
       readJsonBody(req)
         .then((payload) => {
-          onAgentEvent(payload);
+          onDaemonPageEvent(payload);
           writeJson(res, 200, { ok: true });
         })
         .catch((error) => {

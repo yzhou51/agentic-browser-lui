@@ -1,13 +1,22 @@
 import path from 'node:path';
-import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { config } from './config.js';
 import { buildCli } from './cli.js';
 import { BrowserController } from './daemon/browserController.js';
-import { AgentControlBridge } from './daemon/agentControlBridge.js';
+import { DaemonPageBridge } from './daemon/daemonPageBridge.js';
 import { CommandProcessor } from './daemon/commandProcessor.js';
-import { createToolModeRuntime, PutterMode, RemoteDevtoolsMode } from './daemon/toolMode.js';
+import { createToolModeRuntime, PuppeteerMode, RemoteDevtoolsMode } from './daemon/toolMode.js';
+import { SessionManager, SESSION_STAGES } from './daemon/sessionManager.js';
+import {
+  normalizeIceUrlList,
+  parseChromeParamsValue,
+  parseTimeoutSeconds,
+  createSessionId,
+  normalizeId,
+  parseDaemonToolOptions,
+  emitToolResult,
+} from './daemon/sessionOptions.js';
 import { createLogger } from './logger.js';
 import { startStaticServer } from './server.js';
 import { createPeerIds } from '../../client/src/sdk/config/peerIds.js';
@@ -23,7 +32,7 @@ const browser = new BrowserController({
   maxPageHeight: config.targetPageHeightMax,
 });
 const commands = new CommandProcessor(browser);
-const agentBridge = new AgentControlBridge({
+const daemonPageBridge = new DaemonPageBridge({
   initialState: {
     daemonId: config.daemonId,
     clientId: config.defaultClientId,
@@ -35,6 +44,8 @@ const agentBridge = new AgentControlBridge({
   },
 });
 
+// Connection/signaling defaults for the daemon. Distinct from the live session
+// state, which is owned by SessionManager (see sessionManager.activeSession).
 const session = {
   daemonId: config.daemonId,
   clientId: config.defaultClientId,
@@ -48,627 +59,19 @@ const session = {
   headless: config.browserHeadless,
 };
 
-function normalizeIceUrlList(value) {
-  if (Array.isArray(value)) {
-    return value
-      .flatMap((entry) => normalizeIceUrlList(entry))
-      .filter(Boolean);
-  }
-
-  const text = String(value || '').trim();
-  if (!text) {
-    return [];
-  }
-
-  return text
-    .split(/[\n,]+/)
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
-function parseChromeParamsValue(raw) {
-  if (raw === undefined || raw === null || raw === '') {
-    return [];
-  }
-
-  if (Array.isArray(raw)) {
-    return raw;
-  }
-
-  if (typeof raw === 'string') {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      throw new Error('chromeParams must be a JSON array.');
-    }
-    return parsed;
-  }
-
-  throw new Error('chromeParams must be a JSON array or JSON string array.');
-}
-
-function parseTimeoutSeconds(value, fallbackSeconds) {
-  if (value === undefined || value === null || value === '') {
-    return fallbackSeconds;
-  }
-
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error('timeout must be a positive number (seconds).');
-  }
-
-  return Math.floor(parsed);
-}
-
-function createSessionId() {
-  return `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function normalizeId(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
-function normalizeToolFlagName(name) {
-  const raw = String(name || '').trim();
-  if (!raw) {
-    return '';
-  }
-  const base = raw.replace(/^-+/, '');
-  return base.replace(/-([a-z])/g, (_, char) => char.toUpperCase());
-}
-
-function parseAweDaemonToolOptions(argv = []) {
-  if (!Array.isArray(argv) || !argv.length) {
-    return null;
-  }
-
-  if (!argv.some((arg) => String(arg || '').startsWith('--'))) {
-    return null;
-  }
-
-  const options = {};
-  for (let index = 0; index < argv.length; index += 1) {
-    const token = String(argv[index] || '');
-    if (!token.startsWith('--')) {
-      continue;
-    }
-
-    const eqIndex = token.indexOf('=');
-    const rawName = eqIndex === -1 ? token : token.slice(0, eqIndex);
-    const inlineValue = eqIndex === -1 ? '' : token.slice(eqIndex + 1);
-    const key = normalizeToolFlagName(rawName);
-    if (!key) {
-      continue;
-    }
-
-    if (eqIndex !== -1) {
-      options[key] = inlineValue;
-      continue;
-    }
-
-    const next = index + 1 < argv.length ? String(argv[index + 1] || '') : '';
-    if (next && !next.startsWith('--')) {
-      options[key] = next;
-      index += 1;
-      continue;
-    }
-
-    options[key] = true;
-  }
-
-  const payload = {
-    targetUrl: options.targetUrl,
-    sessionId: options.sessionId,
-  };
-
-  payload.sessionId = String(payload.sessionId || '').trim();
-
-  if (payload.sessionId) {
-    const derived = createPeerIds(payload.sessionId);
-    payload.daemonId = payload.daemonId || derived.daemonId;
-    payload.clientId = payload.clientId || derived.clientId;
-  }
-
-  if (!payload.daemonId || !payload.clientId || !payload.targetUrl) {
-    return null;
-  }
-
-  if (options.timeout !== undefined) {
-    payload.timeout = Number(options.timeout);
-  }
-  if (options.signalingServer !== undefined) {
-    payload.signalingServer = String(options.signalingServer || '').trim();
-  }
-  if (options.stunUrls !== undefined) {
-    payload.stunUrls = options.stunUrls;
-  }
-  if (options.turnUrls !== undefined) {
-    payload.turnUrls = options.turnUrls;
-  }
-  if (options.turnUsername !== undefined) {
-    payload.turnUsername = options.turnUsername;
-  }
-  if (options.turnCredential !== undefined) {
-    payload.turnCredential = options.turnCredential;
-  }
-  if (options.chrome !== undefined) {
-    payload.chrome = options.chrome;
-  }
-  if (options.remoteDebuggingPort !== undefined) {
-    payload.remoteDebuggingPort = options.remoteDebuggingPort;
-  }
-  if (options.chromeParams !== undefined) {
-    payload.chromeParams = options.chromeParams;
-  }
-  if (options.jsonCompact !== undefined) {
-    payload.jsonCompact = Boolean(options.jsonCompact);
-  }
-
-  return payload;
-}
-
-function emitToolResult(data, { compact = false, isError = false } = {}) {
-  const text = compact
-    ? JSON.stringify(data)
-    : JSON.stringify(data, null, 2);
-  if (isError) {
-    console.error(text);
-    return;
-  }
-  console.log(text);
-}
-
-let clientMessageTimeoutHandle = null;
-// Pending `leave` grace timer -- see scheduleLeaveTermination(). Non-null means a
-// leave was received and we are waiting to see if the client reconnects (refresh)
-// before actually terminating the session (close).
-let pendingLeaveHandle = null;
-let pendingLeaveClientId = '';
-let currentClientMessageTimeoutMs = Number(config.clientMessageTimeoutMs || 120000);
-const sessionSnapshots = [];
-const SESSION_STAGES = {
-  START: 'start',
-  LAUNCH_CHROME: 'lauch_chrome',
-  OPEN_DAEMON_PAGE: 'open_daemon_page',
-  OPEN_TARGET_PAGE: 'open_target_page',
-  CONNECT_TO_SIGNAL_SERVER: 'connect_to_signalServer',
-  WAIT_CLIENT_RESOLVE: 'wait_client_resolve',
-  USER_INTERACTION: 'user_interaction',
-  FINISH: 'finish',
-};
-const activeSession = {
-  id: '',
-  daemonId: '',
-  clientId: '',
-  targetUrl: '',
-  timeoutMs: currentClientMessageTimeoutMs,
-  stage: SESSION_STAGES.START,
-  status: 'idle',
-  statusMessage: '',
-  outcome: '',
-  connected: false,
-  connectedAt: 0,
-  resolved: false,
-  startedAt: 0,
-  lastResolveAt: 0,
-  lastResolveFrom: '',
-  lastFinishAt: 0,
-  lastFinishFrom: '',
-  completedAt: 0,
-  snapshots: sessionSnapshots,
-};
-const sessionReadyWaiters = [];
-const sessionCompletionWaiters = [];
-
-function updateSessionProgress(stage, status, statusMessage = '') {
-  activeSession.stage = stage;
-  activeSession.status = status;
-  activeSession.statusMessage = statusMessage;
-}
-
-function notifySessionCompletionWaiters(result) {
-  while (sessionCompletionWaiters.length) {
-    const waiter = sessionCompletionWaiters.shift();
-    clearTimeout(waiter.timer);
-    waiter.resolve(result);
-  }
-}
-
-function completeSession(outcome, statusMessage = '') {
-  if (activeSession.completedAt) {
-    return;
-  }
-
-  clearClientMessageTimeout();
-  // The session is ending now; any deferred leave timer is moot.
-  clearPendingLeave('session_completed');
-  activeSession.outcome = outcome;
-  activeSession.completedAt = Date.now();
-  updateSessionProgress(SESSION_STAGES.FINISH, outcome, statusMessage);
-  notifySessionCompletionWaiters({
-    outcome,
-    status: activeSession.status,
-    stage: activeSession.stage,
-    statusMessage,
-    completedAt: activeSession.completedAt,
-  });
-}
-
-function enqueueTerminalNotice(type, {
-  clientId = '',
-  message = '',
-  status = '',
-  outcome = '',
-  stage = SESSION_STAGES.FINISH,
-} = {}) {
-  const targetId = String(clientId || activeSession.clientId || '').trim();
-  if (!targetId) {
-    return null;
-  }
-
-  return agentBridge.enqueue('send_peer_notice', {
-    targetId,
-    type,
-    requestId: `${type}-${Date.now()}`,
-    message,
-    payload: {
-      clientId: targetId,
-      sessionId: activeSession.id,
-      stage,
-      status,
-      outcome,
-      completedAt: Date.now(),
-    },
-  });
-}
-
-async function handleTerminationMessage(options = {}) {
-  const {
-    expectedActiveClientId,
-    messageOrigin,
-    payloadClientId,
-    outcome,
-    statusMessage,
-    snapshotPrefix,
-    sendNotice = false,
-    updateSessionState = null, // function to update activeSession state
-  } = options;
-
-  const originMatchesActiveClient = normalizeId(messageOrigin) && expectedActiveClientId && normalizeId(messageOrigin) === expectedActiveClientId;
-  const payloadMatchesActiveClient = normalizeId(payloadClientId) && expectedActiveClientId && normalizeId(payloadClientId) === expectedActiveClientId;
-  const accepted = Boolean(originMatchesActiveClient || payloadMatchesActiveClient || (activeSession.id && !activeSession.completedAt));
-
-  if (!accepted) {
-    return false;
-  }
-
-  // Update session state if needed
-  if (updateSessionState) {
-    updateSessionState();
-  }
-
-  // Capture snapshot
-  try {
-    const snapshot = await browser.saveTargetSnapshotToFile({
-      fullPage: true,
-      outputDir: config.timeoutSnapshotDir,
-      fileNamePrefix: snapshotPrefix,
-    });
-    rememberTimeoutSnapshot(snapshot, outcome);
-  } catch (error) {
-    logger.warn(`Failed to capture ${outcome} snapshot.`, {
-      error: error.message,
-    });
-  }
-
-  // Close only the daemon.html control page as part of termination cleanup
-  // (client finish/leave or timeout). This must run BEFORE completeSession(),
-  // because completeSession() notifies the completion waiters that drive the
-  // runtime's browser shutdown -- once that teardown starts it races (and closes)
-  // the CDP connection, making page.close() fail. The target page and the browser
-  // itself are intentionally left untouched here.
-  try {
-    await browser.closeDaemonPage();
-  } catch (error) {
-    logger.warn(`Failed to close daemon page on ${outcome}.`, {
-      error: error.message,
-    });
-  }
-
-  // Complete session
-  completeSession(outcome, statusMessage);
-
-  // Send terminal notice if requested
-  if (sendNotice) {
-    enqueueTerminalNotice(`${outcome}_ack`, {
-      clientId: activeSession.clientId,
-      message: activeSession.statusMessage,
-      status: activeSession.status,
-      outcome: activeSession.outcome,
-    });
-  }
-
-  return true;
-}
-
-// Cancel a pending leave grace timer, if any. Returns true if one was cancelled.
-function clearPendingLeave(reason = '') {
-  if (!pendingLeaveHandle) {
-    return false;
-  }
-  clearTimeout(pendingLeaveHandle);
-  pendingLeaveHandle = null;
-  const cancelledFor = pendingLeaveClientId;
-  pendingLeaveClientId = '';
-  logger.info('LEAVE_GRACE_CANCELLED', { reason, clientId: cancelledFor });
-  return true;
-}
-
-// Handle a `leave` message with a grace window instead of terminating right away.
-// A page refresh and a page close both emit `leave`; by deferring termination we
-// give a refreshing client a chance to reconnect (it will send `resolve` again),
-// in which case the resolve handler cancels this timer. If nobody reconnects, the
-// timer fires and we terminate the session as a genuine close.
-function scheduleLeaveTermination(options = {}) {
-  const { expectedActiveClientId, messageOrigin, payloadClientId } = options;
-  const originMatchesActiveClient = normalizeId(messageOrigin) && expectedActiveClientId && normalizeId(messageOrigin) === expectedActiveClientId;
-  const payloadMatchesActiveClient = normalizeId(payloadClientId) && expectedActiveClientId && normalizeId(payloadClientId) === expectedActiveClientId;
-  const accepted = Boolean(originMatchesActiveClient || payloadMatchesActiveClient || (activeSession.id && !activeSession.completedAt));
-
-  if (!accepted) {
-    return false;
-  }
-
-  // A repeated leave simply restarts the grace window.
-  if (pendingLeaveHandle) {
-    clearTimeout(pendingLeaveHandle);
-    pendingLeaveHandle = null;
-  }
-
-  pendingLeaveClientId = normalizeId(messageOrigin || payloadClientId) || String(activeSession.clientId || '');
-  const graceMs = Number(config.leaveGraceMs) || 8000;
-  logger.info('LEAVE_GRACE_STARTED', { graceMs, clientId: pendingLeaveClientId });
-
-  pendingLeaveHandle = setTimeout(() => {
-    pendingLeaveHandle = null;
-    pendingLeaveClientId = '';
-    // Grace window elapsed with no reconnect -> treat as a real page close.
-    logger.info('LEAVE_GRACE_ELAPSED', { clientId: options.payloadClientId || options.messageOrigin || '' });
-    void handleTerminationMessage(options);
-  }, graceMs);
-
-  return true;
-}
-
-function waitForSessionCompletion(timeoutMs = 0) {
-  if (activeSession.completedAt) {
-    return Promise.resolve({
-      outcome: activeSession.outcome,
-      status: activeSession.status,
-      stage: activeSession.stage,
-      statusMessage: activeSession.statusMessage,
-      completedAt: activeSession.completedAt,
-    });
-  }
-
-  return new Promise((resolve, reject) => {
-    const waiter = {
-      resolve,
-      reject,
-      timer: null,
-    };
-
-    if (timeoutMs > 0) {
-      waiter.timer = setTimeout(() => {
-        const index = sessionCompletionWaiters.indexOf(waiter);
-        if (index !== -1) {
-          sessionCompletionWaiters.splice(index, 1);
-        }
-        reject(new Error('Timed out waiting for session completion.'));
-      }, timeoutMs);
-    }
-
-    sessionCompletionWaiters.push(waiter);
-  });
-}
-
-function notifySessionReadyWaiters() {
-  if (!(activeSession.connected && activeSession.resolved)) {
-    return;
-  }
-
-  while (sessionReadyWaiters.length) {
-    const waiter = sessionReadyWaiters.shift();
-    clearTimeout(waiter.timer);
-    waiter.resolve({
-      sessionId: activeSession.id,
-      connectedAt: activeSession.connectedAt,
-      resolveAt: activeSession.lastResolveAt,
-      resolveFrom: activeSession.lastResolveFrom,
-    });
-  }
-}
-
-function waitForSessionReady(timeoutMs) {
-  if (activeSession.connected && activeSession.resolved) {
-    return Promise.resolve({
-      sessionId: activeSession.id,
-      connectedAt: activeSession.connectedAt,
-      resolveAt: activeSession.lastResolveAt,
-      resolveFrom: activeSession.lastResolveFrom,
-    });
-  }
-
-  return new Promise((resolve, reject) => {
-    const waiter = {
-      resolve,
-      reject,
-      timer: null,
-    };
-
-    waiter.timer = setTimeout(() => {
-      const index = sessionReadyWaiters.indexOf(waiter);
-      if (index !== -1) {
-        sessionReadyWaiters.splice(index, 1);
-      }
-      reject(new Error('Timed out waiting for client connection and resolve message.'));
-    }, timeoutMs);
-
-    sessionReadyWaiters.push(waiter);
-  });
-}
-
-function waitForSessionReadyOrCompletion(timeoutMs = 0) {
-  if (activeSession.connected && activeSession.resolved) {
-    return Promise.resolve({
-      kind: 'ready',
-      data: {
-        sessionId: activeSession.id,
-        connectedAt: activeSession.connectedAt,
-        resolveAt: activeSession.lastResolveAt,
-        resolveFrom: activeSession.lastResolveFrom,
-      },
-    });
-  }
-
-  if (activeSession.completedAt) {
-    return Promise.resolve({
-      kind: 'completion',
-      data: {
-        outcome: activeSession.outcome,
-        status: activeSession.status,
-        stage: activeSession.stage,
-        statusMessage: activeSession.statusMessage,
-        completedAt: activeSession.completedAt,
-      },
-    });
-  }
-
-  return new Promise((resolve, reject) => {
-    let settled = false;
-
-    const finalize = (result) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearInterval(probeTimer);
-      clearTimeout(timeoutTimer);
-      resolve(result);
-    };
-
-    const probe = () => {
-      if (activeSession.connected && activeSession.resolved) {
-        finalize({
-          kind: 'ready',
-          data: {
-            sessionId: activeSession.id,
-            connectedAt: activeSession.connectedAt,
-            resolveAt: activeSession.lastResolveAt,
-            resolveFrom: activeSession.lastResolveFrom,
-          },
-        });
-        return;
-      }
-
-      if (activeSession.completedAt) {
-        finalize({
-          kind: 'completion',
-          data: {
-            outcome: activeSession.outcome,
-            status: activeSession.status,
-            stage: activeSession.stage,
-            statusMessage: activeSession.statusMessage,
-            completedAt: activeSession.completedAt,
-          },
-        });
-      }
-    };
-
-    const probeTimer = setInterval(probe, 100);
-    const timeoutTimer = timeoutMs > 0
-      ? setTimeout(() => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearInterval(probeTimer);
-        reject(new Error('Timed out waiting for session readiness or completion.'));
-      }, timeoutMs)
-      : null;
-
-    probe();
-  });
-}
-
-function rememberTimeoutSnapshot(snapshot = {}, type = 'timeout') {
-  const snapshotPath = String(snapshot.outputPath || '').trim();
-  if (!snapshotPath) {
-    return;
-  }
-
-  const capturedAt = Date.now();
-  sessionSnapshots.push({
-    type: String(type || 'timeout').trim() || 'timeout',
-    timestamp: new Date(capturedAt).toISOString(),
-    path: snapshotPath,
-  });
-}
-
-function clearClientMessageTimeout() {
-  if (!clientMessageTimeoutHandle) {
-    return;
-  }
-  clearTimeout(clientMessageTimeoutHandle);
-  clientMessageTimeoutHandle = null;
-}
-
-function armClientMessageTimeout(reason = 'init', timeoutMsOverride = null) {
-  clearClientMessageTimeout();
-  const timeoutMs = Number(timeoutMsOverride || currentClientMessageTimeoutMs || config.clientMessageTimeoutMs || 120000);
-  currentClientMessageTimeoutMs = timeoutMs;
-  clientMessageTimeoutHandle = setTimeout(async () => {
-    clientMessageTimeoutHandle = null;
-
-    logger.warn('Client message timeout reached. Capturing full-page snapshot.', {
-      timeoutMs,
-      reason,
-      clientId: session.clientId,
-      outputDir: config.timeoutSnapshotDir,
-    });
-
-    try {
-      const snapshot = await browser.saveTargetSnapshotToFile({
-        fullPage: true,
-        outputDir: config.timeoutSnapshotDir,
-        fileNamePrefix: `timeout-${session.clientId || 'client'}`,
-      });
-      rememberTimeoutSnapshot(snapshot, 'timeout');
-      logger.info('Timeout snapshot saved.', {
-        outputPath: snapshot.outputPath,
-        targetUrl: snapshot?.targetPage?.url || '',
-      });
-    } catch (error) {
-      logger.error('Timeout snapshot failed.', {
-        error: error.message,
-      });
-    }
-
-    if (activeSession.id) {
-      completeSession('timeout', `Session timed out after ${Math.max(1, Math.floor(timeoutMs / 1000))} seconds.`);
-      enqueueTerminalNotice('timeout_notice', {
-        clientId: activeSession.clientId,
-        message: activeSession.statusMessage,
-        status: activeSession.status,
-        outcome: activeSession.outcome,
-      });
-    }
-  }, timeoutMs);
-}
-
-async function waitForAgentOnline(timeoutMs = 12000) {
+const sessionManager = new SessionManager({
+  browser,
+  daemonPageBridge,
+  logger,
+  config,
+  getFallbackClientId: () => session.clientId,
+});
+const { activeSession } = sessionManager;
+
+async function waitForDaemonPageOnline(timeoutMs = 12000) {
   const timeoutAt = Date.now() + timeoutMs;
   while (Date.now() < timeoutAt) {
-    if (agentBridge.isOnline(10000)) {
+    if (daemonPageBridge.isOnline(10000)) {
       return true;
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -695,7 +98,7 @@ async function startSessionWorkflow(payload = {}) {
   const timeoutSeconds = parseTimeoutSeconds(payload.timeout, Math.max(1, Math.floor((config.clientMessageTimeoutMs || 120000) / 1000)));
   const timeoutMs = timeoutSeconds * 1000;
   // daemon.html is the sole daemon-side control page.
-  const agentPageName = 'daemon.html';
+  const daemonPageName = 'daemon.html';
   const signalingServer = String(payload.signalingServer || session.signalingServer || config.signalingServer || '').trim();
   const stunUrls = normalizeIceUrlList(payload.stunUrls).length
     ? normalizeIceUrlList(payload.stunUrls)
@@ -720,29 +123,17 @@ async function startSessionWorkflow(payload = {}) {
   const chromeParamsRaw = payload.chromeParams ?? process.env.DAEMON_SESSION_START_CHROME_PARAMS_JSON ?? '[]';
   const chromeParams = parseChromeParamsValue(chromeParamsRaw);
 
-  activeSession.id = sessionId;
-  activeSession.daemonId = daemonId;
-  activeSession.clientId = clientId;
-  activeSession.targetUrl = targetUrl;
-  activeSession.timeoutMs = timeoutMs;
-  activeSession.stage = SESSION_STAGES.START;
-  activeSession.status = 'running';
-  activeSession.statusMessage = 'session initialized';
-  activeSession.outcome = '';
-  activeSession.connected = false;
-  activeSession.connectedAt = 0;
-  activeSession.resolved = false;
-  activeSession.startedAt = Date.now();
-  activeSession.lastResolveAt = 0;
-  activeSession.lastResolveFrom = '';
-  activeSession.lastFinishAt = 0;
-  activeSession.lastFinishFrom = '';
-  activeSession.completedAt = 0;
-  sessionSnapshots.length = 0;
+  sessionManager.beginSession({
+    id: sessionId,
+    daemonId,
+    clientId,
+    targetUrl,
+    timeoutMs,
+  });
 
-  updateSessionProgress(SESSION_STAGES.START, 'running', 'starting session flow');
+  sessionManager.updateProgress(SESSION_STAGES.START, 'running', 'starting session flow');
 
-  updateSessionProgress(SESSION_STAGES.LAUNCH_CHROME, 'running', 'launching chrome');
+  sessionManager.updateProgress(SESSION_STAGES.LAUNCH_CHROME, 'running', 'launching chrome');
   const launchResult = await commands.handle({
     type: 'launch_chrome',
     payload: {
@@ -764,7 +155,7 @@ async function startSessionWorkflow(payload = {}) {
     config.staticServerHost === '0.0.0.0' || config.staticServerHost === '::'
       ? 'localhost'
       : config.staticServerHost;
-  const daemonUrl = new URL(`http://${openHost}:${config.staticServerPort}/${agentPageName}`);
+  const daemonUrl = new URL(`http://${openHost}:${config.staticServerPort}/${daemonPageName}`);
   daemonUrl.searchParams.set('uid', daemonId);
   daemonUrl.searchParams.set('remote', clientId);
   daemonUrl.searchParams.set('host', signalingServer);
@@ -781,12 +172,12 @@ async function startSessionWorkflow(payload = {}) {
     daemonUrl.searchParams.set('turnCredential', turnCredential);
   }
 
-  updateSessionProgress(SESSION_STAGES.OPEN_DAEMON_PAGE, 'running', 'opening daemon page');
+  sessionManager.updateProgress(SESSION_STAGES.OPEN_DAEMON_PAGE, 'running', 'opening daemon page');
   await commands.handle({
     type: 'open_url',
     payload: { url: daemonUrl.toString() },
   });
-  updateSessionProgress(SESSION_STAGES.OPEN_TARGET_PAGE, 'running', 'opening target page');
+  sessionManager.updateProgress(SESSION_STAGES.OPEN_TARGET_PAGE, 'running', 'opening target page');
   const openTargetResult = await commands.handle({
     type: 'open_target_page',
     payload: {
@@ -795,15 +186,15 @@ async function startSessionWorkflow(payload = {}) {
     },
   });
 
-  const online = await waitForAgentOnline(12000);
+  const online = await waitForDaemonPageOnline(12000);
   if (!online) {
-    updateSessionProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'error', 'daemon bridge did not come online in time');
+    sessionManager.updateProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'error', 'daemon bridge did not come online in time');
     throw new Error('daemon bridge did not come online in time.');
   }
 
-  updateSessionProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'running', 'connecting to signaling server');
+  sessionManager.updateProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'running', 'connecting to signaling server');
   const requestId = `${sessionId}-connect`;
-  const connectCommand = agentBridge.enqueue('connect_only', {
+  const connectCommand = daemonPageBridge.enqueue('connect_only', {
     daemonId,
     clientId,
     signalingServer,
@@ -814,13 +205,13 @@ async function startSessionWorkflow(payload = {}) {
     requestId,
   });
 
-  armClientMessageTimeout('session_start', timeoutMs);
+  sessionManager.armClientMessageTimeout('session_start', timeoutMs);
 
-  updateSessionProgress(SESSION_STAGES.WAIT_CLIENT_RESOLVE, 'running', 'waiting for client resolve');
+  sessionManager.updateProgress(SESSION_STAGES.WAIT_CLIENT_RESOLVE, 'running', 'waiting for client resolve');
   let waitResult = null;
   try {
-    waitResult = await waitForSessionReady(timeoutMs + 500);
-    updateSessionProgress(SESSION_STAGES.USER_INTERACTION, 'running', 'user interaction phase');
+    waitResult = await sessionManager.waitForSessionReady(timeoutMs + 500);
+    sessionManager.updateProgress(SESSION_STAGES.USER_INTERACTION, 'running', 'user interaction phase');
   } catch (error) {
     if (!/Timed out waiting for client connection and resolve message/i.test(String(error?.message || ''))) {
       throw error;
@@ -831,7 +222,7 @@ async function startSessionWorkflow(payload = {}) {
     });
   }
 
-  const completion = await waitForSessionCompletion(timeoutMs + 1500);
+  const completion = await sessionManager.waitForSessionCompletion(timeoutMs + 1500);
 
   return {
     ok: true,
@@ -856,7 +247,7 @@ async function startSessionWorkflow(payload = {}) {
       resolveFrom: waitResult?.resolveFrom || activeSession.lastResolveFrom || '',
     },
     completion,
-    agentPage: agentPageName,
+    daemonPage: daemonPageName,
     flow: {
       interaction: 'Client sends mouse/keyboard/text over data channel; daemon replays to Puppeteer target.',
       timeoutSnapshot: `Timeout (${timeoutSeconds}s) captures snapshot and returns timeout status.`,
@@ -877,7 +268,7 @@ const cli = buildCli({
   submitCommand: (command) => commands.handle(command),
 });
 
-const toolModePayload = parseAweDaemonToolOptions(process.argv.slice(2));
+const toolModePayload = parseDaemonToolOptions(process.argv.slice(2));
 
 if (process.argv.length > 2 && !toolModePayload) {
   cli.parse(process.argv);
@@ -907,14 +298,14 @@ if (process.argv.length > 2 && !toolModePayload) {
       // this config), whereas currentClientMessageTimeoutMs is only armed later.
       // Reading currentClientMessageTimeoutMs here would return the default
       // (e.g. 120s) instead of the session's --timeout value (e.g. 300s).
-      clientMessageTimeoutMs: activeSession.timeoutMs || currentClientMessageTimeoutMs,
+      clientMessageTimeoutMs: activeSession.timeoutMs || sessionManager.currentClientMessageTimeoutMs,
     }),
     submitCommand: (command) => commands.handle(command),
-    getAgentCommandsAfter: (after) => agentBridge.getCommandsAfter(after),
-    onAgentEvent: async (event) => {
+    getDaemonPageCommands: (after) => daemonPageBridge.getCommandsAfter(after),
+    onDaemonPageEvent: async (event) => {
       const kind = String(event?.kind || '').trim();
       if (kind === 'heartbeat') {
-        agentBridge.mergeState(event.state || {});
+        daemonPageBridge.mergeState(event.state || {});
         return;
       }
       if (kind === 'status') {
@@ -943,14 +334,14 @@ if (process.argv.length > 2 && !toolModePayload) {
           if (connectedClientId && expectedClientId && connectedClientId === expectedClientId) {
             activeSession.connected = true;
             activeSession.connectedAt = Date.now();
-            notifySessionReadyWaiters();
+            sessionManager.notifyReadyWaiters();
           }
         }
-        agentBridge.markSeen(event.status || null);
+        daemonPageBridge.markSeen(event.status || null);
         return;
       }
       if (kind === 'command_result') {
-        agentBridge.recordCommandResult(event);
+        daemonPageBridge.recordCommandResult(event);
         return;
       }
       if (kind === 'peer_message') {
@@ -995,10 +386,10 @@ if (process.argv.length > 2 && !toolModePayload) {
             activeSession.connected = true;
             activeSession.connectedAt = Date.now();
           }
-          armClientMessageTimeout('peer_message', currentClientMessageTimeoutMs);
+          sessionManager.armClientMessageTimeout('peer_message', sessionManager.currentClientMessageTimeoutMs);
           logger.debug('Client message timeout reset from peer message.', {
             origin: messageOrigin,
-            timeoutMs: currentClientMessageTimeoutMs,
+            timeoutMs: sessionManager.currentClientMessageTimeoutMs,
           });
         }
 
@@ -1010,7 +401,7 @@ if (process.argv.length > 2 && !toolModePayload) {
             // A resolve from the active client during a leave grace window means
             // the client reconnected -- i.e. the previous `leave` was a page
             // refresh, not a close. Cancel the deferred termination.
-            clearPendingLeave('reconnect_resolve');
+            sessionManager.clearPendingLeave('reconnect_resolve');
             if (!activeSession.connected) {
               activeSession.connected = true;
               activeSession.connectedAt = Date.now();
@@ -1018,8 +409,8 @@ if (process.argv.length > 2 && !toolModePayload) {
             activeSession.resolved = true;
             activeSession.lastResolveAt = Date.now();
             activeSession.lastResolveFrom = messageOrigin || payloadClientId;
-            notifySessionReadyWaiters();
-            updateSessionProgress(SESSION_STAGES.USER_INTERACTION, 'running', 'resolve received, user interaction phase');
+            sessionManager.notifyReadyWaiters();
+            sessionManager.updateProgress(SESSION_STAGES.USER_INTERACTION, 'running', 'resolve received, user interaction phase');
           }
           logger.info('RESOLVE_RECEIVED', {
             origin: String(event?.origin || ''),
@@ -1030,7 +421,7 @@ if (process.argv.length > 2 && !toolModePayload) {
         } else if (parsedType === 'finish') {
           const expectedActiveClientId = normalizeId(activeSession.clientId);
           const earlyFinishForActiveSession = Boolean(activeSession.id && !activeSession.completedAt);
-          const acceptedFinish = await handleTerminationMessage({
+          const acceptedFinish = await sessionManager.handleTerminationMessage({
             expectedActiveClientId,
             messageOrigin,
             payloadClientId,
@@ -1058,7 +449,7 @@ if (process.argv.length > 2 && !toolModePayload) {
           // immediately: a refresh emits the same `leave` as a close. If the client
           // reconnects (resolve) within config.leaveGraceMs, the resolve handler
           // cancels this; otherwise the timer fires and terminates as a real close.
-          const scheduledLeave = scheduleLeaveTermination({
+          const scheduledLeave = sessionManager.scheduleLeaveTermination({
             expectedActiveClientId,
             messageOrigin,
             payloadClientId,
@@ -1079,7 +470,7 @@ if (process.argv.length > 2 && !toolModePayload) {
           });
         } else if (parsedType === 'timeout') {
           const expectedActiveClientId = normalizeId(activeSession.clientId);
-          const acceptedTimeout = await handleTerminationMessage({
+          const acceptedTimeout = await sessionManager.handleTerminationMessage({
             expectedActiveClientId,
             messageOrigin,
             payloadClientId,
@@ -1105,7 +496,7 @@ if (process.argv.length > 2 && !toolModePayload) {
           });
         }
 
-        agentBridge.recordPeerMessage(event);
+        daemonPageBridge.recordPeerMessage(event);
         return;
       }
       if (kind === 'peer_command_result') {
@@ -1145,17 +536,17 @@ if (process.argv.length > 2 && !toolModePayload) {
           }
         }
 
-        agentBridge.recordPeerCommandResult(event);
+        daemonPageBridge.recordPeerCommandResult(event);
         return;
       }
-      agentBridge.markSeen();
+      daemonPageBridge.markSeen();
     },
   });
 
   let shuttingDown = false;
 
   if (!toolModePayload) {
-    armClientMessageTimeout('runtime_start');
+    sessionManager.armClientMessageTimeout('runtime_start');
   }
 
   const shutdown = async (exitCode = null, options = {}) => {
@@ -1183,8 +574,8 @@ if (process.argv.length > 2 && !toolModePayload) {
     }
 
     try {
-      clearClientMessageTimeout();
-      clearPendingLeave('shutdown');
+      sessionManager.clearClientMessageTimeout();
+      sessionManager.clearPendingLeave('shutdown');
 
       // Browser teardown is best-effort: a failure here must not prevent exit.
       try {
@@ -1197,7 +588,7 @@ if (process.argv.length > 2 && !toolModePayload) {
             requestedRemoteDebuggingPort: browser.remoteDebuggingPort,
           }).shutdownBrowser();
         } else {
-          await new PutterMode({ browser, logger, reason: 'default runtime shutdown' }).shutdownBrowser();
+          await new PuppeteerMode({ browser, logger, reason: 'default runtime shutdown' }).shutdownBrowser();
         }
       } catch (error) {
         logger.warn('Browser shutdown reported an error; continuing to exit.', {
@@ -1293,7 +684,7 @@ if (process.argv.length > 2 && !toolModePayload) {
     try {
       const startResult = await startSessionWorkflow({
         ...toolModePayload,
-        agentPage: 'daemon.html',
+        daemonPage: 'daemon.html',
       });
       const toolModeRuntime = createToolModeRuntime({
         browser,
@@ -1306,7 +697,7 @@ if (process.argv.length > 2 && !toolModePayload) {
         browserConnectionMode: browser.browserConnectionMode,
       });
 
-      const completion = await waitForSessionCompletion(Math.max(activeSession.timeoutMs + 60000, activeSession.timeoutMs));
+      const completion = await sessionManager.waitForSessionCompletion(Math.max(activeSession.timeoutMs + 60000, activeSession.timeoutMs));
       const ok = completion.outcome === 'success';
       const result = {
         ok,
@@ -1314,7 +705,7 @@ if (process.argv.length > 2 && !toolModePayload) {
         stage: activeSession.stage,
         status: activeSession.status,
         message: completion.statusMessage || (ok ? 'Session completed successfully.' : 'Session completed with timeout.'),
-        snapshots: sessionSnapshots,
+        snapshots: sessionManager.snapshots,
         start: startResult,
         completion,
       };
@@ -1322,7 +713,7 @@ if (process.argv.length > 2 && !toolModePayload) {
       emitToolResult(result, { compact: Boolean(toolModePayload.jsonCompact) });
       await shutdown(ok ? 0 : 124, { toolModeRuntime });
     } catch (error) {
-      updateSessionProgress(activeSession.stage || SESSION_STAGES.START, 'error', error.message);
+      sessionManager.updateProgress(activeSession.stage || SESSION_STAGES.START, 'error', error.message);
       emitToolResult({
         ok: false,
         stage: activeSession.stage,

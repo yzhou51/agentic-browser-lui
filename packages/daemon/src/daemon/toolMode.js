@@ -14,16 +14,16 @@ export class RemoteDevtoolsMode {
   }
 }
 
-export class PutterMode {
+export class PuppeteerMode {
   constructor({ browser, logger, reason }) {
     this.browser = browser;
     this.logger = logger;
     this.reason = reason || 'default';
-    this.name = 'putter';
+    this.name = 'puppeteer';
   }
 
   async shutdownBrowser() {
-    this.logger.info('Daemon shutdown in putter mode: closing target page and Chrome.', {
+    this.logger.info('Daemon shutdown in puppeteer mode: closing target page and Chrome.', {
       reason: this.reason,
     });
     await this.browser.closeTargetPage();
@@ -57,8 +57,8 @@ export function createToolModeRuntime({ browser, logger, requestedRemoteDebuggin
   }
 
   const reason = requestedPort && !attachedToRemote
-    ? 'remote-debugging-port requested but attach failed; fallback to putter mode'
+    ? 'remote-debugging-port requested but attach failed; fallback to puppeteer mode'
     : 'remote-debugging-port not provided';
 
-  return new PutterMode({ browser, logger, reason });
+  return new PuppeteerMode({ browser, logger, reason });
 }

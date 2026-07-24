@@ -75,8 +75,8 @@ For automatic share to work reliably when attaching to an existing Chrome, that 
 
 - `--remote-debugging-port=<DAEMON_CHROME_REMOTE_DEBUGGING_PORT>`
 - `--allow-http-screen-capture`
-- `--auto-select-tab-capture-source-by-title=Agentic Browser Target`
-- `--auto-select-desktop-capture-source=Agentic Browser Target`
+- `--auto-select-tab-capture-source-by-title=DUC Target`
+- `--auto-select-desktop-capture-source=DUC Target`
 - `--use-fake-ui-for-media-stream` (optional; recommended for test-only automation)
 - A writable `--user-data-dir` (same profile daemon is configured to use)
 
@@ -87,8 +87,8 @@ Ubuntu example (launch attached Chrome manually first):
   --remote-debugging-port=9222 \
   --user-data-dir="/tmp/daemon-chrome-profile" \
   --allow-http-screen-capture \
-  --auto-select-tab-capture-source-by-title="Agentic Browser Target" \
-  --auto-select-desktop-capture-source="Agentic Browser Target"
+  --auto-select-tab-capture-source-by-title="DUC Target" \
+  --auto-select-desktop-capture-source="DUC Target"
 ```
 
 Then start daemon tool-mode with matching remote debugging port:
