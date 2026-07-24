@@ -1,5 +1,5 @@
 import {
-  AgenticBrowserClient,
+  DirectUserControlClient,
   createPeerIds,
   createViewerMouseCommandSender,
   hasAnySearchParam,
@@ -9,13 +9,13 @@ import {
   readSearchParamAny,
   readSearchPercentParam,
   summarizeIceConfigForLog,
-} from '../sdk/index.js';
-import { normalizeRtcIceOptions, parseRtcIceServersJson } from '../sdk/rtcConfig.js';
+} from './sdk/index.js';
+import { normalizeRtcIceOptions, parseRtcIceServersJson } from './sdk/config/rtcConfig.js';
 
 async function init() {
-  const runtimeConfig = await loadClientRuntimeConfig('/client-demo.runtime.json');
+  const runtimeConfig = await loadClientRuntimeConfig('/client.runtime.json');
   const searchParams = new URLSearchParams(window.location.search);
-  const client = new AgenticBrowserClient();
+  const ducClient = new DirectUserControlClient();
   let connected = false;
   let isMousePressed = false;
   let activePointerId = null;
@@ -107,9 +107,9 @@ async function init() {
                           runtimeConfig.signalingServer || 
                           import.meta.env?.SIGNALING_SERVER || 
                           defaultSignalingServer);
-  console.log('[mobile_client] Resolved signaling server to:', envSignalingServer, '(from config:', runtimeConfig.signalingServer, ')');
+  console.log('[client] Resolved signaling server to:', envSignalingServer, '(from config:', runtimeConfig.signalingServer, ')');
   if (!runtimeConfig.signalingServer && !import.meta.env?.SIGNALING_SERVER) {
-    console.warn('[mobile_client] Using default signaling server. Consider setting SIGNALING_SERVER env var or /client-demo.runtime.json');
+    console.warn('[client] Using default signaling server. Consider setting SIGNALING_SERVER env var or /client.runtime.json');
   }
   const sessionId = readSearchParam(searchParams, 'sessionId', runtimeConfig.sessionId || import.meta.env?.SESSION_ID || '');
   const derivedPeerIds = sessionId ? createPeerIds(sessionId) : null;
@@ -178,7 +178,7 @@ async function init() {
     }
 
     leaveSent = true;
-    client.setDaemonId(daemonId);
+    ducClient.setDaemonId(daemonId);
     const leaveMessage = {
       type: 'leave',
       requestId: `leave-${Date.now()}`,
@@ -189,14 +189,14 @@ async function init() {
     };
 
     try {
-      console.log('[mobile] sending leave message', { reason, daemonId });
+      console.log('[client] sending leave message', { reason, daemonId });
       await Promise.race([
-        client.sendMessage(leaveMessage, daemonId),
+        ducClient.sendMessage(leaveMessage, daemonId),
         new Promise(resolve => setTimeout(resolve, 500)), // Max wait 500ms
       ]);
-      console.log('[mobile] leave message sent', { reason });
+      console.log('[client] leave message sent', { reason });
     } catch (error) {
-      console.log('[mobile] leave message failed', { reason, error: error?.message });
+      console.log('[client] leave message failed', { reason, error: error?.message });
     }
   }
 
@@ -209,8 +209,8 @@ async function init() {
       throw new Error('not connected to daemon.');
     }
 
-    client.setDaemonId(daemonId);
-    await client.sendMessage(
+    ducClient.setDaemonId(daemonId);
+    await ducClient.sendMessage(
       {
         type: 'finish',
         requestId: `finish-${Date.now()}`,
@@ -232,7 +232,7 @@ async function init() {
   }
 
   function setStatus(state, message) {
-    console.log(`[mobile_client] status update: state=${state} message=${message}`);
+    console.log(`[client] status update: state=${state} message=${message}`);
   }
 
   function setClientState(stateKey, message) {
@@ -275,7 +275,7 @@ async function init() {
     return `${minutes}:${String(seconds).padStart(2, '0')}`;
   }
 
-  function renderCountdown() {
+  function renderCountdown(state) {
     if (!el.timeoutCountdown) {
       return;
     }
@@ -285,11 +285,12 @@ async function init() {
     }
     const remaining = Math.max(0, countdownDeadline - Date.now());
     const totalSeconds = Math.ceil(remaining / 1000);
-    let state = 'ok';
-    if (totalSeconds <= 10) {
-      state = 'urgent';
-    } else if (totalSeconds <= 30) {
-      state = 'warn';
+    if (!state) {
+      if (totalSeconds <= 10) {
+        state = 'urgent';
+      } else if (totalSeconds <= 30) {
+        state = 'warn';
+      }
     }
     el.timeoutCountdown.hidden = false;
     el.timeoutCountdown.dataset.state = state;
@@ -301,13 +302,14 @@ async function init() {
       window.clearInterval(countdownTimer);
       countdownTimer = null;
     }
-    sessionTimeoutMs = 0;
+
     countdownDeadline = 0;
-    if (el.timeoutCountdown) {
-      el.timeoutCountdown.hidden = true;
-      el.timeoutCountdown.dataset.state = 'idle';
-      el.timeoutCountdown.textContent = '';
-    }
+    renderCountdown('ok');
+    //if (el.timeoutCountdown) {
+    //  el.timeoutCountdown.hidden = true;
+    //  el.timeoutCountdown.dataset.state = 'idle';
+    //  el.timeoutCountdown.textContent = '';
+   // }
   }
 
   // Show a little less than the true daemon timeout so the countdown reaches
@@ -318,7 +320,7 @@ async function init() {
   function startSessionCountdown(timeoutMs) {
     const rawMs = Number(timeoutMs);
     if (!Number.isFinite(rawMs) || rawMs <= 0) {
-      console.debug('[mobile_client] countdown not started: invalid timeoutMs', timeoutMs);
+      log(`[client] countdown not started: invalid timeoutMs ${timeoutMs}`);
       return;
     }
 
@@ -330,16 +332,6 @@ async function init() {
     if (!countdownTimer) {
       countdownTimer = window.setInterval(renderCountdown, 500);
     }
-    renderCountdown();
-  }
-
-  // Reset the visible countdown, mirroring the daemon resetting its
-  // client-message timeout whenever it receives a peer message from us.
-  function noteUserActivity() {
-    if (!sessionTimeoutMs) {
-      return;
-    }
-    countdownDeadline = Date.now() + sessionTimeoutMs;
     renderCountdown();
   }
 
@@ -368,14 +360,14 @@ async function init() {
     setClientState('daemonConnecting', `Sending Resolve to daemon "${getDaemonId()}" (attempt ${resolveAttempts})...`);
     log(`Resolve send requested (${reason}) attempt ${resolveAttempts}: ${JSON.stringify(resolveMessage)}`);
 
-    void client.sendMessage(resolveMessage)
+    void ducClient.sendMessage(resolveMessage)
       .then(() => {
         setClientState('daemonConnecting', `Resolve sent to daemon "${getDaemonId()}". Waiting for response...`);
         log(`Resolve sent to daemon "${getDaemonId()}".`);
       })
       .catch((error) => {
         log(`Resolve send failed: ${error.message}`);
-        console.warn('[mobile_client] Resolve send failed', {
+        console.warn('[client] Resolve send failed', {
           reason,
           attempt: resolveAttempts,
           error: error?.message,
@@ -417,6 +409,71 @@ async function init() {
       log(`[DEBUG] Saved calibration frame snapshot (${canvas.width}x${canvas.height}) as ${link.download}`);
     } catch (error) {
       log(`[DEBUG] Failed to save calibration frame snapshot: ${error.message}`);
+    }
+  }
+
+  // Overlay canvas that holds the last remote frame after the session ends (see
+  // freezeRemoteVideoFrame). Kept at module scope so it can be removed on reconnect.
+  let freezeFrameCanvas = null;
+
+  // Remove any frozen last-frame overlay and restore the live <video> element.
+  function clearFrozenFrame() {
+    if (freezeFrameCanvas) {
+      freezeFrameCanvas.remove();
+      freezeFrameCanvas = null;
+    }
+    if (el.remoteVideo) {
+      el.remoteVideo.style.display = '';
+    }
+  }
+
+  // On terminal events (finish/timeout) the daemon stops sharing and the client
+  // disconnects, which ends the WebRTC track and blanks the <video>. To keep the last
+  // rendered frame on screen, snapshot the current frame into a canvas and overlay it in
+  // place of the video (the poster attribute is unreliable -- Chrome won't repaint a
+  // poster once the element has already rendered frames). applyViewScale() always writes
+  // the video's box geometry inline, so copying its style.cssText (plus object-fit:contain,
+  // matching the <video>) reproduces the identical rendered box, including zoom/scroll
+  // scaling. The live video is then hidden beneath the frozen canvas. Returns true if a
+  // frame was captured.
+  function freezeRemoteVideoFrame() {
+    // Idempotent: a session ends via two paths (Finish button and the daemon's
+    // finish_ack/timeout_notice). The first to run captures the live frame; a later call
+    // must keep that frame rather than clobber it (by then the track is gone and a
+    // re-capture would be blank).
+    if (freezeFrameCanvas) {
+      return true;
+    }
+
+    const video = el.remoteVideo;
+    if (!video || !video.videoWidth || !video.videoHeight || !video.parentNode) {
+      return false;
+    }
+
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.id = 'remoteVideoFreeze';
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        return false;
+      }
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      canvas.style.cssText = video.style.cssText;
+      canvas.style.display = 'block';
+      canvas.style.objectFit = 'contain';
+      canvas.style.borderRadius = '12px';
+
+      video.parentNode.insertBefore(canvas, video.nextSibling);
+      video.style.display = 'none';
+      freezeFrameCanvas = canvas;
+      log(`Froze last remote frame (${canvas.width}x${canvas.height}).`);
+      return true;
+    } catch (error) {
+      log(`Failed to freeze last remote frame: ${error?.message || error}`);
+      return false;
     }
   }
 
@@ -755,7 +812,7 @@ async function init() {
     };
     
     if (type === 'mouse_move') {
-      console.debug('[sendMappedMouseCommand] mouse_move', {
+      let data = {
         transmitted: {
           x: 'set by mapping',
           y: 'set by mapping',
@@ -768,8 +825,9 @@ async function init() {
         },
         clientLocal: {
           isDragging: extraPayload.isDragging,
-        },
-      });
+        }
+      };
+      log('[sendMappedMouseCommand] mouse_move: ' + JSON.stringify(data));
     }
     
     return sendMouseCommand(type, event, fullPayload);
@@ -1069,8 +1127,7 @@ async function init() {
       return;
     }
 
-    noteUserActivity();
-    const requestId = await client.sendCommand('text_input', { text });
+    const requestId = await ducClient.sendCommand('text_input', { text });
     log(`text_input sent (${requestId}): ${JSON.stringify(text)}`);
   }
 
@@ -1080,8 +1137,7 @@ async function init() {
       return;
     }
 
-    noteUserActivity();
-    const requestId = await client.sendCommand('key_press', { key });
+    const requestId = await ducClient.sendCommand('key_press', { key });
     log(`key_press sent (${requestId}): ${key}`);
   }
 
@@ -1091,8 +1147,8 @@ async function init() {
         log(`Skip ${type}: remote stream is not ready.`);
         return `skipped-${type}-${Date.now()}`;
       }
-      noteUserActivity();
-      return client.sendCommand(type, payload);
+
+      return ducClient.sendCommand(type, payload);
     },
     videoElement: el.remoteVideo,
     getIsDragging: () => isMousePressed,
@@ -1122,7 +1178,7 @@ async function init() {
     },
   });
 
-  client.onRemoteStream = (stream) => {
+  ducClient.onRemoteStream = (stream) => {
     const mediaStream =
       (stream?.mediaStream instanceof MediaStream)
         ? stream.mediaStream
@@ -1132,6 +1188,10 @@ async function init() {
       el.remoteVideo.autoplay = true;
       el.remoteVideo.playsInline = true;
       el.remoteVideo.muted = true;
+
+      // Drop any frozen last-frame overlay from a prior session and restore the live
+      // video before attaching the new stream.
+      clearFrozenFrame();
 
       if (el.remoteVideo.srcObject !== mediaStream) {
         el.remoteVideo.srcObject = mediaStream;
@@ -1148,7 +1208,7 @@ async function init() {
     log('Remote stream event received without mediaStream.');
   };
 
-  client.onSignalingConnected = ({ uid, host }) => {
+  ducClient.onSignalingConnected = ({ uid, host }) => {
     log(`Signaling authenticated as "${uid}" via "${host}".`);
   };
 
@@ -1254,7 +1314,7 @@ async function init() {
     el.keyboardFab.classList.remove('is-dragging');
   });
 
-  client.onDisconnect = () => {
+  ducClient.onDisconnect = () => {
     connected = false;
     messageChannelReady = false;
     daemonReadyHint = false;
@@ -1270,7 +1330,7 @@ async function init() {
     log('Disconnected from signaling server.');
   };
 
-  client.onMessage = ({ origin, message }) => {
+  ducClient.onMessage = ({ origin, message }) => {
     try {
       const rawMessage =
         message && typeof message === 'object'
@@ -1282,7 +1342,7 @@ async function init() {
       if (parsed.type === 'daemon_online') {
         const daemonId = String(parsed?.payload?.daemonId || getDaemonId()).trim();
         if (daemonId) {
-          client.setDaemonId(daemonId);
+          ducClient.setDaemonId(daemonId);
         }
         daemonReadyHint = true;
         startSessionCountdown(parsed?.payload?.timeoutMs);
@@ -1329,7 +1389,7 @@ async function init() {
             }
 
             try {
-              await client.sendMessage({
+              await ducClient.sendMessage({
                 type: 'calibrate_result',
                 requestId: parsed.requestId,
                 payload: detection,
@@ -1349,7 +1409,7 @@ async function init() {
         clearResolveRetryTimer();
         setClientState('daemonConnected', 'Resolve acknowledged by daemon. Waiting for result...');
         log(`Resolve acknowledged by daemon. Waiting for result...`);
-        console.log('[mobile_client] resolve_ack received', { requestId: parsed.requestId });
+        console.log('[client] resolve_ack received', { requestId: parsed.requestId });
         return;
       }
       if (parsed.type === 'resolve_result') {
@@ -1373,8 +1433,13 @@ async function init() {
         setClientState('daemonDisconnected', noticeMessage);
         log(`${parsed.type} received: ${noticeMessage}`);
 
+        // Preserve the last frame before tearing down the stream, so the view does not
+        // blank out on session end. Capture must happen while the track is still live;
+        // the overlay canvas then covers the (about-to-end) video.
+        freezeRemoteVideoFrame();
+
         stopSessionCountdown();
-        void client.disconnect().catch(() => {});
+        void ducClient.disconnect().catch(() => {});
         connected = false;
         leaveSent = false;
         resolveSent = false;
@@ -2012,6 +2077,22 @@ async function init() {
         await sendFinishMessage('button_click');
         setClientState('daemonInteraction', `Finish sent to daemon "${getDaemonId()}".`);
         log(`Finish sent to daemon "${getDaemonId()}".`);
+
+        // Preserve the last frame before disconnecting -- the capture must happen while
+        // the track is still live, so it runs here rather than only in the finish_ack path.
+        freezeRemoteVideoFrame();
+
+        // Finish delivered: proactively disconnect from the OWT signaling server
+        // instead of waiting for the daemon's finish_ack (which may not arrive
+        // before teardown). Mirrors the finish_ack/timeout_notice teardown below.
+        void ducClient.disconnect().catch(() => {});
+        connected = false;
+        leaveSent = false;
+        resolveSent = false;
+        resolveAcked = false;
+        resolveAttempts = 0;
+        resolveInFlight = false;
+        clearResolveRetryTimer();
       } catch (error) {
         setClientState('daemonDisconnected', `Finish failed: ${error.message}`);
         log(`Finish failed: ${error.message}`);
@@ -2037,14 +2118,14 @@ async function init() {
 
   try {
     const rtcOptions = getRtcConnectOptions();
-    console.log('[mobile-client] p2p connect config', {
+    console.log('[client] p2p connect config', {
       signalingServer: getSignalingUrl(),
       daemonId: getDaemonId(),
       clientId: getClientId(),
       ...summarizeIceConfigForLog(rtcOptions),
     });
 
-    client.connect({
+    ducClient.connect({
       signalingHost: getSignalingUrl(),
       clientId: getClientId(),
       daemonId: getDaemonId(),

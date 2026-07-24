@@ -2,15 +2,15 @@
 
 Client subproject includes:
 
-- SDK: `src/sdk/AgenticBrowserClient.js`
+- SDK: `src/sdk/DirectUserControlClient.js`
 - Viewer helpers: `src/sdk/viewerUtils.js`
-- Demo UI: pages in `public/client.html` and `public/mobile_client.html`, with logic in `src/demo/client.js`
+- Demo UI: `public/direct-user-control.html`, with logic in `src/client.js`
 
 ## Dev
 
 - Create env file for demo defaults:
   - PowerShell: `Copy-Item .env.example .env`
-  - Edit `SIGNALING_SERVER`, `CLIENT_ID`, `DAEMON_ID`, and optional STUN/TURN values in `.env` if needed.
+  - Edit `SIGNALING_SERVER` and optional STUN/TURN values in `.env` if needed.
 - `pnpm dev`
 
 From workspace root, equivalent command is `pnpm dev:client`.
@@ -21,22 +21,18 @@ From workspace root, equivalent command is `pnpm dev:client`.
 
 From workspace root, equivalent command is `pnpm start:client`.
 
-This starts a local static server for this package and prints an `http://.../client.html` URL.
-Runtime defaults are generated from `.env` into `client-demo.runtime.json`.
+This starts a local static server for this package and prints an `http://.../direct-user-control.html` URL.
+Runtime defaults are generated from `.env` into `client.runtime.json`.
 
 Pages:
 
-- `public/client.html`: remote client viewer/input page.
-- `public/mobile_client.html`: mobile-first client page with dedicated keyboard-launch button and a Finish action pinned at the opposite bottom corner.
-- Agent page is now split into `../agent/public/agent.html` and served by the `@agentic-browser/agent` package.
+- `public/direct-user-control.html`: client page with dedicated keyboard-launch button and a Finish action pinned at the opposite bottom corner.
 
 Default static server listen host is `0.0.0.0`, default port is `5174`.
 
 Environment values used by static mode:
 
 - `SIGNALING_SERVER` (default: `http://localhost:8095`)
-- `CLIENT_ID` (default: `client-1`)
-- `DAEMON_ID` (default: `daemon-1`)
 - `STUN_SERVER_URLS` (comma/newline separated, optional)
 - `TURN_SERVER_URLS` (comma/newline separated, optional)
 - `TURN_USERNAME` (optional)
@@ -48,14 +44,14 @@ Environment values used by static mode:
 ## Alternative Dev Mode
 
 - `pnpm dev:client` from workspace root
-- `pnpm dev` from workspace root (runs daemon, client, and agent together)
+- `pnpm dev` from workspace root (runs daemon and client together)
 
 ## SDK quick usage
 
 ```js
-import { AgenticBrowserClient } from './src/sdk/index.js';
+import { DirectUserControlClient } from './src/sdk/index.js';
 
-const client = new AgenticBrowserClient();
+const client = new DirectUserControlClient();
 await client.connect({
   signalingHost: 'http://localhost:8095',
   clientId: 'client-1',
@@ -72,7 +68,7 @@ await client.sendCommand('open_url', { url: 'https://example.com' });
 
 `src/sdk/index.js` re-exports:
 
-- `AgenticBrowserClient`
+- `DirectUserControlClient`
 - `getRenderedVideoContentRect`
 - `mapPointerToVideoSpace`
 - `getPointerButtonName`
@@ -83,11 +79,9 @@ These helpers were extracted from the demo so other client UIs can reuse the sam
 
 ## Demo behavior
 
-- `src/demo/client.js` now consumes the shared SDK viewer helpers instead of owning duplicate geometry logic.
+- `src/demo/client.js` consumes the shared SDK viewer helpers instead of owning duplicate geometry logic.
 - Drag interactions are sent as `mouse_down`, `mouse_move`, and `mouse_up` commands so the daemon can replay press-and-drag flows on the shared page.
 - Static mode serves vendored browser dependencies locally, including `public/vendor/socket.io.min.js`, to avoid CDN dependencies during signaling setup.
-- The client page (`src/demo/client.js`) now focuses on viewer/input control only.
-- Client and agent forms expose STUN/TURN fields directly after signaling configuration, and those defaults can be generated into `client-demo.runtime.json`.
-- The mobile page (`src/demo/mobile_client.js`) is isolated from desktop flow and adds an explicit `Open Keyboard` button for phone text input.
-- Mobile status chip in `public/mobile_client.html` is hidden by default for customer-facing demos and can be re-enabled for debugging by adding `debug-status` class to `body`.
-- Agent REST actions are now maintained in the standalone `@agentic-browser/agent` package.
+- The client page (`src/demo/client.js`) adds an explicit `Open Keyboard` button for phone text input and a `Finish` action.
+- STUN/TURN fields default from `.env` and can be generated into `client.runtime.json`.
+- Mobile status chip in `public/direct-user-control.html` is hidden by default for customer-facing demos and can be re-enabled for debugging by adding `debug-status` class to `body`.

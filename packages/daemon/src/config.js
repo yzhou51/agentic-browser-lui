@@ -32,13 +32,13 @@ function readBoolean(value, fallback = false) {
   return fallback;
 }
 
-const clientMessageTimeoutSeconds = readPositiveInt(process.env.DAEMON_CLIENT_MESSAGE_TIMEOUT_SECONDS, 120);
+const daemonTimeoutSeconds = readPositiveInt(process.env.DAEMON_TIMEOUT_SECONDS, 120);
 
 // ICE config is single-sourced from RTC_ICE_SERVERS_JSON (the same variable the
-// client and agent use), with the individual STUN_SERVER_URLS/TURN_* vars kept
+// client uses), with the individual STUN_SERVER_URLS/TURN_* vars kept
 // only as a fallback. normalizeRtcIceOptions derives stun/turn url lists and
 // credentials from whichever form is supplied, so downstream (server.js ->
-// daemon-agent.html query params) keeps working unchanged.
+// daemon.html query params) keeps working unchanged.
 const parsedRtcIceServers = parseRtcIceServersJson(process.env.RTC_ICE_SERVERS_JSON);
 if (String(process.env.RTC_ICE_SERVERS_JSON || '').trim() && !parsedRtcIceServers.length) {
   console.warn('Ignoring invalid RTC_ICE_SERVERS_JSON in daemon .env.');
@@ -67,7 +67,7 @@ const runtimeIceConfig = normalizeRtcIceOptions(
 export const config = {
   signalingServer: process.env.SIGNALING_SERVER || 'http://localhost:8095',
   daemonId: process.env.DAEMON_ID || 'daemon-1',
-  defaultClientId: process.env.CLIENT_ID || 'client-1',
+  clientId: process.env.CLIENT_ID || 'client-1',
   stunUrls: runtimeIceConfig.stunUrls,
   turnUrls: runtimeIceConfig.turnUrls,
   turnUsername: runtimeIceConfig.turnUsername,
@@ -81,7 +81,7 @@ export const config = {
   targetPageHeightMax: readPositiveInt(process.env.TARGET_PAGE_HEIGHT_MAX, 2160), // 4K default
   daemonLogLevel: process.env.DAEMON_LOG_LEVEL || process.env.LOG_LEVEL || 'info',
   daemonLogFile: process.env.DAEMON_LOG_FILE || '/var/log/agent-browser-daemon.log',
-  clientMessageTimeoutMs: clientMessageTimeoutSeconds * 1000,
+  daemonTimeoutMs: daemonTimeoutSeconds * 1000,
   // Grace window after a `leave` before the session is actually terminated. A
   // page refresh and a page close both emit `leave`; if the same client
   // reconnects within this window we treat it as a refresh and cancel the

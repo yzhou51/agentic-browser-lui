@@ -1,33 +1,33 @@
 export class RemoteDevtoolsMode {
-  constructor({ browser, logger, requestedRemoteDebuggingPort }) {
-    this.browser = browser;
+  constructor({ browserController, logger, requestedRemoteDebuggingPort }) {
+    this.browserCtrl = browserController;
     this.logger = logger;
     this.requestedRemoteDebuggingPort = requestedRemoteDebuggingPort;
-    this.name = 'remote-devtools';
+    this.name = 'CDP';
   }
 
   async shutdownBrowser() {
-    this.logger.info('Daemon shutdown in remote-devtools mode: preserving Chrome and target page; daemon process will exit only.', {
+    this.logger.info('Daemon shutdown in CDP mode: preserving Chrome and target page; daemon process will exit only.', {
       requestedRemoteDebuggingPort: this.requestedRemoteDebuggingPort,
     });
-    await this.browser.disconnectBrowser();
+    await this.browserCtrl.disconnectBrowser();
   }
 }
 
-export class PutterMode {
-  constructor({ browser, logger, reason }) {
-    this.browser = browser;
+export class PuppeteerMode {
+  constructor({ browserController, logger, reason }) {
+    this.browserCtrl = browserController;
     this.logger = logger;
     this.reason = reason || 'default';
-    this.name = 'putter';
+    this.name = 'puppeteer';
   }
 
   async shutdownBrowser() {
-    this.logger.info('Daemon shutdown in putter mode: closing target page and Chrome.', {
+    this.logger.info('Daemon shutdown in puppeteer mode: closing target page and Chrome.', {
       reason: this.reason,
     });
-    await this.browser.closeTargetPage();
-    await this.browser.closeBrowser();
+    await this.browserCtrl.closeTargetPage();
+    await this.browserCtrl.closeBrowser();
   }
 }
 
@@ -44,21 +44,21 @@ function normalizePort(value) {
   return Math.floor(parsed);
 }
 
-export function createToolModeRuntime({ browser, logger, requestedRemoteDebuggingPort }) {
+export function createToolModeRuntime({ browserController, logger, requestedRemoteDebuggingPort }) {
   const requestedPort = normalizePort(requestedRemoteDebuggingPort);
-  const attachedToRemote = browser.getRuntimeMode() === 'remote-devtools';
+  const attachedToRemote = browserController.getRuntimeMode() === 'CDP';
 
   if (requestedPort && attachedToRemote) {
     return new RemoteDevtoolsMode({
-      browser,
+      browserController,
       logger,
       requestedRemoteDebuggingPort: requestedPort,
     });
   }
 
   const reason = requestedPort && !attachedToRemote
-    ? 'remote-debugging-port requested but attach failed; fallback to putter mode'
+    ? 'remote-debugging-port requested but attach failed; fallback to puppeteer mode'
     : 'remote-debugging-port not provided';
 
-  return new PutterMode({ browser, logger, reason });
+  return new PuppeteerMode({ browserController, logger, reason });
 }

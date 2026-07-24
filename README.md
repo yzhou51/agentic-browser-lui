@@ -1,19 +1,16 @@
-# agentic-browser-lui
+# Direct User Control
 
-Node.js pnpm workspace for an agentic browser P2P system with three sub-projects:
+Node.js pnpm workspace for an direct user control P2P system with two sub-projects:
 
-- `packages/daemon`: Daemon endpoint tooling, local CLI, daemon-side WebRTC page, and REST bridge for browser control.
-- `packages/client`: Client SDK and demo UI that receives daemon video stream and sends operation commands via data channel.
-- `packages/agent`: Agent control page that calls daemon REST APIs (`connect`, `share/start`, `share/stop`, `page/open`, `chrome/launch`, and so on).
+- `packages/daemon`: Daemon endpoint tooling, local CLI, and daemon-side WebRTC page for browser control.
+- `packages/client`: Client SDK and UI that receives daemon video stream and sends operation commands via data channel.
 
 ## Project Layout
 
-- `packages/daemon/public`: daemon operator UI (`daemon-agent.html`) and browser entrypoint (`daemon-agent.js`).
-- `packages/daemon/src`: daemon CLI/server/runtime code, including REST endpoints.
-- `packages/client/src/sdk`: reusable client SDK pieces, including the main client wrapper and viewer/pointer helpers used by the demo.
-- `packages/client/src/demo`: demo UI wired on top of the SDK exports.
-- `packages/agent/public/agent.html`: standalone agent action page.
-- `packages/agent/src/demo`: agent action handlers for daemon REST orchestration.
+- `packages/daemon/public`: daemon control UI (`daemon.html`) and browser entrypoint (`daemon.js`).
+- `packages/daemon/src`: daemon CLI/server/runtime code.
+- `packages/client/src/sdk`: reusable client SDK pieces, including the main client wrapper and viewer/pointer helpers used by the UI.
+- `packages/client/src`: UI wired on top of the SDK exports.
 
 ## Prerequisites
 
@@ -46,11 +43,6 @@ Node.js pnpm workspace for an agentic browser P2P system with three sub-projects
    ```bash
    cp packages/client/.env.example packages/client/.env
    # Edit packages/client/.env with your local values
-   ```
-4. Prepare agent runtime env:
-   ```bash
-   cp packages/agent/.env.example packages/agent/.env
-   # Edit packages/agent/.env with your local values
    ```
 
 ## Start External OWT Signaling Server
@@ -102,19 +94,18 @@ For production or network scenarios where direct P2P is blocked, configure STUN/
    ```
 
 4. Configure STUN/TURN in client and daemon:
-   - Pass as URL params: `?stunUrls=stun:YOUR_STUN_SERVER:3478&turnUrls=turn:YOUR_TURN_SERVER:3478&turnUsername=username&turnCredential=password`
-   - Or set in `.env` files:
+   - Set in `.env` files:
      - `packages/client/.env`: `STUN_SERVER_URLS`, `TURN_SERVER_URLS`, `TURN_USERNAME`, `TURN_CREDENTIAL`
      - `packages/daemon/.env`: Same environment variables
-   - Or in runtime config JSON files (`client-demo.runtime.json`, `daemon-agent.config.json`)
+   - Or in runtime config JSON files (`client.runtime.json`, `daemon.config.json`)
 
 ## Run
 
 The daemon is started via CLI by the agent orchestrator. There are two runtime modes:
 
-### Mode 1: Remote DevTools (Attach to Existing Chrome)
+### Mode 1: CDP (Attach to Existing Chrome)
 
-Use this when Chrome is already running with `--remote-debugging-port` enabled.
+Use this when Chrome is already running with CDP enabled.
 
 **Setup:**
 1. Pre-launch Chrome with remote debugging enabled:
@@ -127,7 +118,7 @@ Use this when Chrome is already running with `--remote-debugging-port` enabled.
      --auto-select-desktop-capture-source
    ```
 
-2. Start client demo static server:
+2. Start client static server:
    ```bash
    pnpm start:client
    ```
@@ -135,25 +126,21 @@ Use this when Chrome is already running with `--remote-debugging-port` enabled.
 3. Start daemon via CLI with `--remote-debugging-port`:
    ```bash
    node packages/daemon/src/cli.js \
-     --daemonId daemon-1 \
-     --clientId client-1 \
+     --sessionId test \
      --remote-debugging-port 9222 \
-     --signalingServer http://localhost:8095 \
-     --targetUrl http://localhost:5174/target-demo.html
+     --timeout 300 \
+     --targetUrl http://localhost:8080/target-demo.html
    ```
 
-4. Open client demo URL:
-   - Default: `http://127.0.0.1:5174/client.html`
-   - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
-   - Ensure `Daemon API URL` points to daemon static server (`http://localhost:8788`)
-   - Click `Connect` and use controls to interact with the target
+4. Open client URL:
+   - Default: `http://127.0.0.1:5174/direct-user-control.html?sessionId=test&scrollRate=100`
 
-### Mode 2: Puppeteer (Auto-launch Chrome)
+### Mode 2: putter (Auto-launch Chrome)
 
-Use this when you want the daemon to launch Chrome automatically via Puppeteer.
+Use this when you want the daemon to launch Chrome automatically via Puppeteer. CDP mode will fallback to this mode when failed to attach to the existing Chrome.
 
 **Setup:**
-1. Start client demo static server:
+1. Start client static server:
    ```bash
    pnpm start:client
    ```
@@ -161,22 +148,18 @@ Use this when you want the daemon to launch Chrome automatically via Puppeteer.
 2. Start daemon via CLI without `--remote-debugging-port`:
    ```bash
    node packages/daemon/src/cli.js \
-     --daemonId daemon-1 \
-     --clientId client-1 \
-     --signalingServer http://localhost:8095 \
-     --targetUrl http://localhost:5174/target-demo.html
+     --sessionId test \
+     --timeout 300 \
+     --targetUrl http://localhost:8080/target-demo.html
    ```
 
-3. Daemon automatically launches Chrome, opens daemon-agent page, and opens target page
+3. Daemon automatically launches Chrome, opens daemon page, and opens target page
 
-4. Open client demo URL:
-   - Default: `http://127.0.0.1:5174/client.html`
-   - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
-   - Ensure `Daemon API URL` points to daemon static server (`http://localhost:8788`)
-   - Click `Connect` and use controls to interact with the target
+4. Open client URL:
+   - Default: `http://127.0.0.1:5174/direct-user-control.html?sessionId=test&scrollRate=100`
 
 **Mode Behavior:**
-- **remote-devtools**: Daemon exits but preserves Chrome and target page (useful for manual inspection)
+- **CDP**: Daemon exits but preserves Chrome and target page (useful for manual inspection)
 - **putter**: Daemon closes Chrome and target page on exit (clean shutdown)
 
 ## Headless Mode for Full Page Capture
@@ -186,16 +169,10 @@ For production or resource-constrained environments, enable headless mode to cap
 **Configuration (in `.env`):**
 ```bash
 BROWSER_HEADLESS=true
-TARGET_PAGE_WIDTH=1920
-TARGET_PAGE_HEIGHT=1080
+TARGET_PAGE_WIDTH_MAX=1920
+TARGET_PAGE_HEIGHT_MAX=1080
+DAEMON_ENABLE_HEADLESS_CALIBRATION=true
 ```
-
-**How it works:**
-1. Chrome launches without GUI (no window displayed)
-2. Viewport is explicitly set to capture full page width
-3. Target page scales down (via CSS `transform: scale(0.9)`) to fit viewport without horizontal scrolling
-4. Client receives scrollable video stream of the entire page
-5. Mobile client can scroll vertically to view all content
 
 **Key features:**
 - Full page width is guaranteed to be visible (no horizontal scroll on client)
@@ -203,20 +180,6 @@ TARGET_PAGE_HEIGHT=1080
 - GPU not required (runs on servers without display)
 - Ideal for headless server deployments
 
-**Test headless mode:**
-```bash
-BROWSER_HEADLESS=true TARGET_PAGE_WIDTH=1920 TARGET_PAGE_HEIGHT=1080 \
-node packages/daemon/src/cli.js \
-  --daemonId daemon-1 \
-  --clientId client-1 \
-  --signalingServer http://localhost:8095 \
-  --targetUrl http://localhost:5174/target-demo.html
-```
-
-**Viewport Customization:**
-- `TARGET_PAGE_WIDTH=2560 TARGET_PAGE_HEIGHT=1440` for higher resolution captures
-- `TARGET_PAGE_WIDTH=1280 TARGET_PAGE_HEIGHT=720` for lower bandwidth
-- Page scaling in `target-demo.html` CSS adjusts automatically based on viewport
 
 ## Development Mode
 
@@ -229,7 +192,6 @@ pnpm dev
 # Or run individually
 pnpm dev:daemon      # Daemon with auto-restart
 pnpm dev:client      # Vite dev server (http://localhost:5173)
-pnpm dev:agent       # Agent static server
 ```
 
 ## Core flow
@@ -238,78 +200,74 @@ pnpm dev:agent       # Agent static server
 sequenceDiagram
     participant Agent
     participant Daemon
-    participant DaemonAgent as Daemon-Agent Page
+    participant DaemonPage as Daemon Page
     participant Signal as OWT Signaling
     participant Client
 
-    Note over Agent,Client: Agent provides session info (signalingServer, daemonId, clientId) to Client out-of-band
+    Note over Agent,Client: Agent provides session info (sessionId) to Client out-of-band
 
-    par User opens mobile client page (can be before daemon starts)
+    par User opens client page (can be before daemon starts)
         Client->>Signal: Connect to OWT signaling server
     end
 
-    Agent->>Daemon: Start via CLI (daemonId, clientId, targetUrl, timeout)
+    Agent->>Daemon: Start via CLI (sessionId, targetUrl, timeout)
 
-    alt remote-debugging-port provided and Chrome already running
-        Daemon->>Daemon: Attach to existing Chrome (remote-devtools mode)
+    alt CDP provided and Chrome already running
+        Daemon->>Daemon: Attach to existing Chrome (CDP mode)
     else otherwise
         Daemon->>Daemon: Launch new Chrome via Puppeteer (putter mode)
     end
 
-    Daemon->>DaemonAgent: Open daemon-agent page in Chrome
+    Daemon->>DaemonPage: Open daemon page in Chrome
     Daemon->>Daemon: Open controlled target page in Chrome
-    DaemonAgent->>Signal: Connect to OWT signaling server
+    DaemonPage->>Signal: Connect to OWT signaling server
 
     loop retry on timeout (2s deadline,  5 attempts)
-        Client->>DaemonAgent: Send Resolve over OWT data channel
-        DaemonAgent-->>Client: Send resolve_ack (acknowledgment)
+        Client->>DaemonPage: Send Resolve over signal channel
+        DaemonPage-->>Client: Send resolve_ack (acknowledgment)
     end
 
-    DaemonAgent->>DaemonAgent: Capture and publish screen share stream (getDisplayMedia)
-    DaemonAgent-->>Client: Send resolve_result (ok or error)
+    DaemonPage->>DaemonPage: Capture and publish screen share stream (getDisplayMedia)
+    DaemonPage-->>Client: Send resolve_result (ok or error)
     Client->>Client: Receive video stream, enable remote interaction
 
     loop User interaction session
-        Client->>DaemonAgent: Send mouse/keyboard/text commands (binary-encoded) over data channel
-        DaemonAgent->>Daemon: Forward command to Puppeteer via REST bridge
+        Client->>DaemonPage: Send mouse/keyboard/text commands (binary-encoded) over data channel
+        DaemonPage->>Daemon: Forward command to Puppeteer via internal bridge
         Daemon->>Daemon: Replay command on controlled target page
-        DaemonAgent-->>Client: Send command_result over data channel
+        DaemonPage-->>Client: Send command_result over data channel
     end
 
     alt Client page closes or navigates away
-        Client->>DaemonAgent: Send Leave (best-effort, 500ms window)
-        DaemonAgent->>Signal: Disconnect from signaling
+        Client->>DaemonPage: Send Leave (best-effort, 500ms window)
+        DaemonPage->>Signal: Disconnect from signaling
+        Daemon->>Daemon: Leave Grace to avoid client refresh 
         Daemon->>Daemon: Capture leave snapshot
         Daemon->>Agent: Session completes with outcome=leave
     else User clicks Finish button
-        Client->>DaemonAgent: Send Finish over data channel
-        DaemonAgent->>Signal: Disconnect from signaling
+        Client->>DaemonPage: Send Finish over signal channel
+        DaemonPage->>Signal: Disconnect from signaling
         Daemon->>Daemon: Capture finish snapshot
         Daemon->>Agent: Session completes with outcome=success
     else No client message within timeout window
         Daemon->>Daemon: Capture timeout snapshot
-        Daemon->>Client: Send timeout_notice over data channel
+        Daemon->>Client: Send timeout_notice over signal channel
         Daemon->>Agent: Session completes with outcome=timeout
     end
 
-    alt remote-devtools mode
+    alt CDP mode
         Daemon->>Daemon: Exit daemon process, preserve Chrome and target page
     else putter mode
         Daemon->>Daemon: Close target page and Chrome, then exit
     end
 ```
 
-## Refactoring Notes
-
-- Client-side viewer geometry and mouse-command helpers were moved from the demo into `packages/client/src/sdk/viewerUtils.js` and re-exported by `packages/client/src/sdk/index.js`.
-- Agent control actions are maintained in the standalone `packages/agent` package.
-
 ## Notes
 
 - Signaling logic in daemon peer page and client follows `peercall.js`/`sc.websocket.js` pattern (`authentication`, `owt-message`, reconnect handling).
 - OWT SDK in this workspace is loaded from vendored browser files at `packages/client/public/vendor/owt.js` and `packages/daemon/public/vendor/owt.js`.
 - Socket.IO is also vendored locally in both daemon and client public assets so signaling does not depend on a CDN-hosted global `io` script.
-- Daemon and client both provide local static file servers to host demo pages over `http://`.
+- Daemon and client both provide local static file servers to host pages over `http://`.
 - Automatic web page capture without user prompt depends on browser/OS policies; this scaffold includes the full data and signaling path and supports manual screen selection.
 - Client mouse coordinates are scaled from rendered video size to source stream resolution before sending `mouse_move` and `mouse_click` commands.
 - Optional smoke test: `pnpm test:signal` uses a root-level Node `socket.io-client` dependency to verify signaling auth and `owt-message` relay.

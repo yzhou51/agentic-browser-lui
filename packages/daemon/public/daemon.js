@@ -1,11 +1,11 @@
 /* global Owt */
 
-import { AgenticBrowserClient } from '/client-sdk/AgenticBrowserClient.js';
-import { decodeMouseCommandBinary } from '/client-sdk/mouseCommandBinary.js';
+import { DirectUserControlClient } from '/client-sdk/DirectUserControlClient.js';
+import { decodeMouseCommand } from '/client-sdk/input/mouseCommandCodec.js';
 
 async function loadRuntimeConfig() {
   try {
-    const response = await fetch('/daemon-agent.config.json', { cache: 'no-store' });
+    const response = await fetch('/daemon.config.json', { cache: 'no-store' });
     if (!response.ok) {
       return {};
     }
@@ -37,9 +37,19 @@ async function loadRuntimeConfig() {
   let daemonOnlineAnnounceTimer = null;
   let resolveSeen = false;
   let resolveInProgress = false;
+  // Set when a client `leave` is seen; the following `resolve` is then treated as a
+  // refresh reconnect, which requires resetting the stale WebRTC peer connection (see
+  // processResolveMessage). Signaling-relayed messages survive a client refresh, but the
+  // P2P data channel (mouse/keyboard/text/calibration) does not.
+  let refreshReconnectPending = false;
   let pendingCalibrationRequestId = null;
   let pendingCalibrationClientId = null;
   let pendingCalibrationAttempt = 0;
+  // Bumped whenever an in-flight calibration must be abandoned (e.g. a client
+  // refresh's `leave`). A calibration run captures the epoch at its start and aborts
+  // if it no longer matches, so a run interrupted mid-flight can't leave its markers
+  // orphaned on the target page after the share is torn down/reconnected.
+  let calibrationEpoch = 0;
   const maxCalibrationAttempts = 2;
 
   function setStatus(text) {
@@ -110,7 +120,7 @@ async function loadRuntimeConfig() {
 
   async function postAgentEvent(payload) {
     try {
-      await fetch('/api/v1/agent/events', {
+      await fetch('/api/v1/page/events', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -131,7 +141,7 @@ async function loadRuntimeConfig() {
   }
 
   async function submitLocalDaemonCommand(command) {
-    const response = await fetch('/daemon-agent.command', {
+    const response = await fetch('/daemon.command', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -148,12 +158,36 @@ async function loadRuntimeConfig() {
   }
 
   async function sendPeerMessage(targetId, message, options) {
-    return p2pClient.sendPeerMessage(targetId, message, options);
+    return ducClient.sendPeerMessage(targetId, message, options);
+  }
+
+  // Abandon any in-flight calibration and strip its markers from the target page.
+  // Used when a client `leave` (refresh/close) interrupts calibration: the pending
+  // request will never be answered, so its injected marker layer must be removed here
+  // rather than relying on handleCalibrationResult()'s cleanup.
+  function cancelPendingCalibration(reason = '') {
+    calibrationEpoch += 1;
+    const hadPending = Boolean(pendingCalibrationRequestId);
+    pendingCalibrationRequestId = null;
+    pendingCalibrationClientId = null;
+    pendingCalibrationAttempt = 0;
+    if (hadPending) {
+      appendMessage(`Calibration cancelled (${reason}); removing markers.`);
+    }
+    submitLocalDaemonCommand({ type: 'remove_calibration_markers', payload: {} }).catch(() => {
+      // Ignore cleanup errors.
+    });
   }
 
   async function requestCalibrationFromClient(clientId, attempt, { settleDelayMs = 0 } = {}) {
+    const epoch = calibrationEpoch;
     if (settleDelayMs > 0) {
       await new Promise((resolve) => window.setTimeout(resolve, settleDelayMs));
+    }
+    // The share may have been torn down (e.g. client refresh) during the settle delay.
+    if (epoch !== calibrationEpoch) {
+      appendMessage('Calibration aborted: session changed before markers were injected.');
+      return;
     }
 
     try {
@@ -161,6 +195,14 @@ async function loadRuntimeConfig() {
       const markers = Array.isArray(injectResult?.markers) ? injectResult.markers : [];
       if (!markers.length) {
         appendMessage('Calibration skipped: no markers were injected.');
+        return;
+      }
+
+      // If the session changed while injecting, the just-injected markers are orphaned;
+      // strip them and bail before requesting calibration from a client that has moved on.
+      if (epoch !== calibrationEpoch) {
+        appendMessage('Calibration aborted after injection: session changed; removing markers.');
+        await submitLocalDaemonCommand({ type: 'remove_calibration_markers', payload: {} }).catch(() => {});
         return;
       }
 
@@ -217,7 +259,7 @@ async function loadRuntimeConfig() {
     pendingCalibrationClientId = null;
     pendingCalibrationAttempt = 0;
 
-    console.log('[daemon-cli] calibrate_result received', payload);
+    console.log('[daemon] calibrate_result received', payload);
     let retryConfig = null;
 
     try {
@@ -272,7 +314,7 @@ async function loadRuntimeConfig() {
   }
 
   async function announceDaemonOnline(reason = 'interval') {
-    if (resolveSeen || !p2pClient.isConnected()) {
+    if (resolveSeen || !ducClient.isConnected()) {
       return;
     }
 
@@ -283,7 +325,7 @@ async function loadRuntimeConfig() {
       return;
     }
 
-    const timeoutMs = Number(runtimeConfig?.clientMessageTimeoutMs) || 0;
+    const timeoutMs = Number(runtimeConfig?.daemonTimeoutMs) || 0;
 
     await sendPeerMessage(
       clientId,
@@ -335,7 +377,7 @@ async function loadRuntimeConfig() {
       if (ArrayBuffer.isView(rawMessage)) {
         const view = rawMessage;
         const sliced = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
-        const decoded = decodeMouseCommandBinary(sliced);
+        const decoded = decodeMouseCommand(sliced);
         if (!decoded) {
           throw new Error('Failed to decode binary message from typed array');
         }
@@ -353,7 +395,7 @@ async function loadRuntimeConfig() {
         for (let index = 0; index < binaryString.length; index += 1) {
           bytes[index] = binaryString.charCodeAt(index);
         }
-        const decoded = decodeMouseCommandBinary(bytes.buffer);
+        const decoded = decodeMouseCommand(bytes.buffer);
         if (!decoded) {
           throw new Error('Failed to decode binary message');
         }
@@ -364,7 +406,7 @@ async function loadRuntimeConfig() {
     }
 
     if (rawMessage instanceof ArrayBuffer) {
-      const decoded = decodeMouseCommandBinary(rawMessage);
+      const decoded = decodeMouseCommand(rawMessage);
       if (!decoded) {
         throw new Error('Failed to decode binary message');
       }
@@ -400,7 +442,7 @@ async function loadRuntimeConfig() {
     const clientId = String(remoteInput?.value || '').trim();
     const signalingHost = String(hostInput?.value || '').trim();
 
-    return p2pClient.connect({
+    return ducClient.connect({
       signalingHost,
       clientId: daemonId,
       daemonId: clientId,
@@ -413,11 +455,11 @@ async function loadRuntimeConfig() {
   }
 
   async function ensureConnected() {
-    return p2pClient.ensureConnected();
+    return ducClient.ensureConnected();
   }
 
   async function shareScreen({ automated = false } = {}) {
-    if (!p2pClient.getClient()) {
+    if (!ducClient.getClient()) {
       setStatus('Connect first.');
       return;
     }
@@ -462,7 +504,7 @@ async function loadRuntimeConfig() {
       new Owt.Base.StreamSourceInfo('screen-cast', 'screen-cast')
     );
 
-    const p2p = p2pClient.getClient();
+    const p2p = ducClient.getClient();
     const publishTargetId = String(remoteInput?.value || '').trim();
     if (!publishTargetId) {
       throw new Error('clientId is required before share publish.');
@@ -499,7 +541,7 @@ async function loadRuntimeConfig() {
       screenStream = null;
     }
 
-    await p2pClient.disconnect();
+    await ducClient.disconnect();
 
     setStatus('Disconnected.');
     await postAgentEvent({
@@ -508,12 +550,54 @@ async function loadRuntimeConfig() {
     });
   }
 
+  // finish/timeout are terminal: fully disconnect (drops the share AND signaling).
   function handleTerminationMessage(type, payload) {
     const clientId = payload?.clientId || 'unknown';
     const reason = payload?.reason || 'unspecified';
     appendMessage(`${type} received from client ${clientId} (${reason})`);
     void disconnect();
     return { ok: true, message: `${type} received` };
+  }
+
+  // A `leave` is emitted for BOTH a genuine close and a page refresh -- the two are
+  // indistinguishable at this point. Unlike finish/timeout, we must NOT drop the OWT
+  // signaling connection here: a refreshing client reconnects and re-sends `resolve`,
+  // and that resolve can only reach us (to trigger a fresh share) if we stayed connected.
+  // The stale screen-share publication is dropped now since the peer that was receiving
+  // it is gone; processResolveMessage() publishes a fresh one on reconnect. A genuine
+  // close is cleaned up by the daemon runtime's leave-grace timer, which closes this
+  // page when no reconnect arrives within the grace window.
+  function handleClientLeave(payload) {
+    const clientId = payload?.clientId || 'unknown';
+    const reason = payload?.reason || 'unspecified';
+    appendMessage(`leave received from client ${clientId} (${reason}); keeping signaling alive for possible refresh reconnect`);
+
+    // Drop the now-dead share publication but keep signaling connected.
+    if (screenStream?.mediaStream) {
+      try {
+        screenStream.mediaStream.getTracks().forEach((track) => track.stop());
+      } catch {
+        // Ignore stop-track errors.
+      }
+      screenStream = null;
+    }
+
+    // A leave mid-calibration leaves markers on the target page that the (now gone)
+    // client will never answer to trigger removal. Cancel and strip them here; the
+    // reconnect's resolve starts a fresh calibration cycle.
+    cancelPendingCalibration('client leave');
+
+    // Treat the next resolve as a refresh reconnect so it rebuilds the P2P data channel.
+    refreshReconnectPending = true;
+
+    // Re-arm for a possible refresh reconnect: clear the resolve guard so a follow-up
+    // resolve re-runs the share handshake, and re-announce daemon_online so the
+    // reconnecting client resolves promptly instead of waiting for its own fallback.
+    // (startDaemonOnlineAnnouncements() also resets resolveSeen.)
+    resolveInProgress = false;
+    startDaemonOnlineAnnouncements();
+
+    return { ok: true, message: 'leave received; awaiting possible refresh reconnect' };
   }
 
   async function handleCommand(command) {
@@ -531,6 +615,7 @@ async function loadRuntimeConfig() {
       case 'extension_ping':
         return forwardCommandViaPuppeteer(command);
       case 'leave':
+        return handleClientLeave(payload);
       case 'finish':
       case 'timeout':
         return handleTerminationMessage(type, payload);
@@ -548,6 +633,27 @@ async function loadRuntimeConfig() {
     try {
       resolveSeen = true;
       stopDaemonOnlineAnnouncements();
+
+      // A refresh reconnect resolves over the (server-relayed) signaling channel, but the
+      // client rebuilt its P2PClient from scratch, so the daemon's existing WebRTC peer
+      // connection to it is stale -- ensureConnected() below won't renegotiate it because
+      // the session identity is unchanged. Explicitly stop the stale per-peer connection
+      // so the shareScreen() publish re-negotiates a fresh PeerConnection and data channel;
+      // without this, inbound data-channel traffic (mouse/keyboard/text and calibrate_result)
+      // never arrives and outbound calibrate_request/video never reaches the client.
+      if (refreshReconnectPending) {
+        refreshReconnectPending = false;
+        const staleClientId = String(incomingOrigin || remoteInput?.value || '').trim();
+        const p2p = ducClient.getClient();
+        if (p2p && typeof p2p.stop === 'function' && staleClientId) {
+          try {
+            p2p.stop(staleClientId);
+            appendMessage(`Refresh reconnect: reset stale P2P connection to ${staleClientId}.`);
+          } catch (error) {
+            appendMessage(`Refresh reconnect: failed to reset P2P connection: ${error?.message || error}`);
+          }
+        }
+      }
 
       await sendPeerMessage(
         incomingOrigin,
@@ -660,9 +766,9 @@ async function loadRuntimeConfig() {
     }
   }
 
-  const p2pClient = new AgenticBrowserClient();
+  const ducClient = new DirectUserControlClient();
 
-  p2pClient.onDisconnect = () => {
+  ducClient.onDisconnect = () => {
     const daemonId = String(uidInput?.value || '').trim();
     const clientId = String(remoteInput?.value || '').trim();
     const signalingServer = String(hostInput?.value || '').trim();
@@ -717,7 +823,7 @@ async function loadRuntimeConfig() {
       }
   }
 
-  p2pClient.onMessage = (event) => {
+  ducClient.onMessage = (event) => {
     inboundMessageQueue = inboundMessageQueue
       .then(() => handleIncomingPeerMessage(event))
       .catch((error) => {
@@ -726,11 +832,11 @@ async function loadRuntimeConfig() {
     return inboundMessageQueue;
   };
 
-  p2pClient.onSignalingConnected = async ({ host }) => {
+  ducClient.onSignalingConnected = async ({ host }) => {
     const daemonId = String(uidInput?.value || '').trim();
     const clientId = String(remoteInput?.value || '').trim();
     const signalingServer = String(host || hostInput?.value || '').trim();
-    const allowedRemoteIds = p2pClient.getAllowedRemoteIds();
+    const allowedRemoteIds = ducClient.getAllowedRemoteIds();
     setStatus(`Connected as ${daemonId}. Waiting for ${clientId} messages.`);
     appendMessage(`connected to signaling: daemon=${daemonId} client=${clientId} host=${signalingServer}`);
     await postAgentEvent({
@@ -746,11 +852,11 @@ async function loadRuntimeConfig() {
     startDaemonOnlineAnnouncements();
   };
 
-  p2pClient.onReconnectAttempt = () => {
+  ducClient.onReconnectAttempt = () => {
     appendMessage('ensureConnected: stale signaling session detected, reconnecting.');
   };
 
-  p2pClient.onRetrySend = ({ label, errorMessage }) => {
+  ducClient.onRetrySend = ({ label, errorMessage }) => {
     appendMessage(`[data-channel] retrying ${label}: ${errorMessage}`);
   };
 
@@ -866,7 +972,7 @@ async function loadRuntimeConfig() {
 
     pollingAgentCommands = true;
     try {
-      const response = await fetch(`/api/v1/agent/commands?after=${encodeURIComponent(agentCommandCursor)}`, {
+      const response = await fetch(`/api/v1/page/commands?after=${encodeURIComponent(agentCommandCursor)}`, {
         cache: 'no-store',
       });
       if (!response.ok) {
@@ -926,7 +1032,7 @@ async function loadRuntimeConfig() {
         daemonId: String(uidInput?.value || '').trim(),
         clientId: String(remoteInput?.value || '').trim(),
         signalingServer: String(hostInput?.value || '').trim(),
-        connected: p2pClient.isConnected(),
+        connected: ducClient.isConnected(),
         sharing: Boolean(screenStream),
         controlTargetMode,
       },
