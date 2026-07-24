@@ -37,9 +37,19 @@ async function loadRuntimeConfig() {
   let daemonOnlineAnnounceTimer = null;
   let resolveSeen = false;
   let resolveInProgress = false;
+  // Set when a client `leave` is seen; the following `resolve` is then treated as a
+  // refresh reconnect, which requires resetting the stale WebRTC peer connection (see
+  // processResolveMessage). Signaling-relayed messages survive a client refresh, but the
+  // P2P data channel (mouse/keyboard/text/calibration) does not.
+  let refreshReconnectPending = false;
   let pendingCalibrationRequestId = null;
   let pendingCalibrationClientId = null;
   let pendingCalibrationAttempt = 0;
+  // Bumped whenever an in-flight calibration must be abandoned (e.g. a client
+  // refresh's `leave`). A calibration run captures the epoch at its start and aborts
+  // if it no longer matches, so a run interrupted mid-flight can't leave its markers
+  // orphaned on the target page after the share is torn down/reconnected.
+  let calibrationEpoch = 0;
   const maxCalibrationAttempts = 2;
 
   function setStatus(text) {
@@ -151,9 +161,33 @@ async function loadRuntimeConfig() {
     return ducClient.sendPeerMessage(targetId, message, options);
   }
 
+  // Abandon any in-flight calibration and strip its markers from the target page.
+  // Used when a client `leave` (refresh/close) interrupts calibration: the pending
+  // request will never be answered, so its injected marker layer must be removed here
+  // rather than relying on handleCalibrationResult()'s cleanup.
+  function cancelPendingCalibration(reason = '') {
+    calibrationEpoch += 1;
+    const hadPending = Boolean(pendingCalibrationRequestId);
+    pendingCalibrationRequestId = null;
+    pendingCalibrationClientId = null;
+    pendingCalibrationAttempt = 0;
+    if (hadPending) {
+      appendMessage(`Calibration cancelled (${reason}); removing markers.`);
+    }
+    submitLocalDaemonCommand({ type: 'remove_calibration_markers', payload: {} }).catch(() => {
+      // Ignore cleanup errors.
+    });
+  }
+
   async function requestCalibrationFromClient(clientId, attempt, { settleDelayMs = 0 } = {}) {
+    const epoch = calibrationEpoch;
     if (settleDelayMs > 0) {
       await new Promise((resolve) => window.setTimeout(resolve, settleDelayMs));
+    }
+    // The share may have been torn down (e.g. client refresh) during the settle delay.
+    if (epoch !== calibrationEpoch) {
+      appendMessage('Calibration aborted: session changed before markers were injected.');
+      return;
     }
 
     try {
@@ -161,6 +195,14 @@ async function loadRuntimeConfig() {
       const markers = Array.isArray(injectResult?.markers) ? injectResult.markers : [];
       if (!markers.length) {
         appendMessage('Calibration skipped: no markers were injected.');
+        return;
+      }
+
+      // If the session changed while injecting, the just-injected markers are orphaned;
+      // strip them and bail before requesting calibration from a client that has moved on.
+      if (epoch !== calibrationEpoch) {
+        appendMessage('Calibration aborted after injection: session changed; removing markers.');
+        await submitLocalDaemonCommand({ type: 'remove_calibration_markers', payload: {} }).catch(() => {});
         return;
       }
 
@@ -508,12 +550,54 @@ async function loadRuntimeConfig() {
     });
   }
 
+  // finish/timeout are terminal: fully disconnect (drops the share AND signaling).
   function handleTerminationMessage(type, payload) {
     const clientId = payload?.clientId || 'unknown';
     const reason = payload?.reason || 'unspecified';
     appendMessage(`${type} received from client ${clientId} (${reason})`);
     void disconnect();
     return { ok: true, message: `${type} received` };
+  }
+
+  // A `leave` is emitted for BOTH a genuine close and a page refresh -- the two are
+  // indistinguishable at this point. Unlike finish/timeout, we must NOT drop the OWT
+  // signaling connection here: a refreshing client reconnects and re-sends `resolve`,
+  // and that resolve can only reach us (to trigger a fresh share) if we stayed connected.
+  // The stale screen-share publication is dropped now since the peer that was receiving
+  // it is gone; processResolveMessage() publishes a fresh one on reconnect. A genuine
+  // close is cleaned up by the daemon runtime's leave-grace timer, which closes this
+  // page when no reconnect arrives within the grace window.
+  function handleClientLeave(payload) {
+    const clientId = payload?.clientId || 'unknown';
+    const reason = payload?.reason || 'unspecified';
+    appendMessage(`leave received from client ${clientId} (${reason}); keeping signaling alive for possible refresh reconnect`);
+
+    // Drop the now-dead share publication but keep signaling connected.
+    if (screenStream?.mediaStream) {
+      try {
+        screenStream.mediaStream.getTracks().forEach((track) => track.stop());
+      } catch {
+        // Ignore stop-track errors.
+      }
+      screenStream = null;
+    }
+
+    // A leave mid-calibration leaves markers on the target page that the (now gone)
+    // client will never answer to trigger removal. Cancel and strip them here; the
+    // reconnect's resolve starts a fresh calibration cycle.
+    cancelPendingCalibration('client leave');
+
+    // Treat the next resolve as a refresh reconnect so it rebuilds the P2P data channel.
+    refreshReconnectPending = true;
+
+    // Re-arm for a possible refresh reconnect: clear the resolve guard so a follow-up
+    // resolve re-runs the share handshake, and re-announce daemon_online so the
+    // reconnecting client resolves promptly instead of waiting for its own fallback.
+    // (startDaemonOnlineAnnouncements() also resets resolveSeen.)
+    resolveInProgress = false;
+    startDaemonOnlineAnnouncements();
+
+    return { ok: true, message: 'leave received; awaiting possible refresh reconnect' };
   }
 
   async function handleCommand(command) {
@@ -531,6 +615,7 @@ async function loadRuntimeConfig() {
       case 'extension_ping':
         return forwardCommandViaPuppeteer(command);
       case 'leave':
+        return handleClientLeave(payload);
       case 'finish':
       case 'timeout':
         return handleTerminationMessage(type, payload);
@@ -548,6 +633,27 @@ async function loadRuntimeConfig() {
     try {
       resolveSeen = true;
       stopDaemonOnlineAnnouncements();
+
+      // A refresh reconnect resolves over the (server-relayed) signaling channel, but the
+      // client rebuilt its P2PClient from scratch, so the daemon's existing WebRTC peer
+      // connection to it is stale -- ensureConnected() below won't renegotiate it because
+      // the session identity is unchanged. Explicitly stop the stale per-peer connection
+      // so the shareScreen() publish re-negotiates a fresh PeerConnection and data channel;
+      // without this, inbound data-channel traffic (mouse/keyboard/text and calibrate_result)
+      // never arrives and outbound calibrate_request/video never reaches the client.
+      if (refreshReconnectPending) {
+        refreshReconnectPending = false;
+        const staleClientId = String(incomingOrigin || remoteInput?.value || '').trim();
+        const p2p = ducClient.getClient();
+        if (p2p && typeof p2p.stop === 'function' && staleClientId) {
+          try {
+            p2p.stop(staleClientId);
+            appendMessage(`Refresh reconnect: reset stale P2P connection to ${staleClientId}.`);
+          } catch (error) {
+            appendMessage(`Refresh reconnect: failed to reset P2P connection: ${error?.message || error}`);
+          }
+        }
+      }
 
       await sendPeerMessage(
         incomingOrigin,
