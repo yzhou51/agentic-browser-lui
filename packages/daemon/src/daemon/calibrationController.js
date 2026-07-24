@@ -30,6 +30,7 @@ export class CalibrationController {
     const targetWidth = Math.max(1, Number(currentViewport.width || 0));
     const targetHeight = Math.max(1, Number(currentViewport.height || 0));
     const markerSize = 40;
+    logger.info('Injecting calibration markers. to page viewport', { targetWidth, targetHeight, markerSize });
 
     // A single fixed pair of corner markers turned out to be fragile: the captured/transmitted
     // video frame has been observed to be CROPPED (not just scaled) relative to the real page,

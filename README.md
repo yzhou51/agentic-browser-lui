@@ -1,6 +1,6 @@
 # Direct User Control
 
-Node.js pnpm workspace for an agentic native browser P2P system with two sub-projects:
+Node.js pnpm workspace for an direct user control P2P system with two sub-projects:
 
 - `packages/daemon`: Daemon endpoint tooling, local CLI, and daemon-side WebRTC page for browser control.
 - `packages/client`: Client SDK and UI that receives daemon video stream and sends operation commands via data channel.
@@ -94,8 +94,7 @@ For production or network scenarios where direct P2P is blocked, configure STUN/
    ```
 
 4. Configure STUN/TURN in client and daemon:
-   - Pass as URL params: `?stunUrls=stun:YOUR_STUN_SERVER:3478&turnUrls=turn:YOUR_TURN_SERVER:3478&turnUsername=username&turnCredential=password`
-   - Or set in `.env` files:
+   - Set in `.env` files:
      - `packages/client/.env`: `STUN_SERVER_URLS`, `TURN_SERVER_URLS`, `TURN_USERNAME`, `TURN_CREDENTIAL`
      - `packages/daemon/.env`: Same environment variables
    - Or in runtime config JSON files (`client.runtime.json`, `daemon.config.json`)
@@ -104,9 +103,9 @@ For production or network scenarios where direct P2P is blocked, configure STUN/
 
 The daemon is started via CLI by the agent orchestrator. There are two runtime modes:
 
-### Mode 1: Remote DevTools (Attach to Existing Chrome)
+### Mode 1: CDP (Attach to Existing Chrome)
 
-Use this when Chrome is already running with `--remote-debugging-port` enabled.
+Use this when Chrome is already running with CDP enabled.
 
 **Setup:**
 1. Pre-launch Chrome with remote debugging enabled:
@@ -127,21 +126,18 @@ Use this when Chrome is already running with `--remote-debugging-port` enabled.
 3. Start daemon via CLI with `--remote-debugging-port`:
    ```bash
    node packages/daemon/src/cli.js \
-     --daemonId daemon-1 \
-     --clientId client-1 \
+     --sessionId test \
      --remote-debugging-port 9222 \
-     --signalingServer http://localhost:8095 \
-     --targetUrl http://localhost:5174/target-demo.html
+     --timeout 300 \
+     --targetUrl http://localhost:8080/target-demo.html
    ```
 
 4. Open client URL:
-   - Default: `http://127.0.0.1:5174/direct-user-control.html`
-   - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
-   - Click `Connect` and use controls to interact with the target
+   - Default: `http://127.0.0.1:5174/direct-user-control.html?sessionId=test&scrollRate=100`
 
-### Mode 2: Puppeteer (Auto-launch Chrome)
+### Mode 2: putter (Auto-launch Chrome)
 
-Use this when you want the daemon to launch Chrome automatically via Puppeteer.
+Use this when you want the daemon to launch Chrome automatically via Puppeteer. CDP mode will fallback to this mode when failed to attach to the existing Chrome.
 
 **Setup:**
 1. Start client static server:
@@ -152,18 +148,15 @@ Use this when you want the daemon to launch Chrome automatically via Puppeteer.
 2. Start daemon via CLI without `--remote-debugging-port`:
    ```bash
    node packages/daemon/src/cli.js \
-     --daemonId daemon-1 \
-     --clientId client-1 \
-     --signalingServer http://localhost:8095 \
-     --targetUrl http://localhost:5174/target-demo.html
+     --sessionId test \
+     --timeout 300 \
+     --targetUrl http://localhost:8080/target-demo.html
    ```
 
 3. Daemon automatically launches Chrome, opens daemon page, and opens target page
 
 4. Open client URL:
-   - Default: `http://127.0.0.1:5174/direct-user-control.html`
-   - Ensure `Signaling URL` is OWT signaling server (`http://localhost:8095`)
-   - Click `Connect` and use controls to interact with the target
+   - Default: `http://127.0.0.1:5174/direct-user-control.html?sessionId=test&scrollRate=100`
 
 **Mode Behavior:**
 - **CDP**: Daemon exits but preserves Chrome and target page (useful for manual inspection)
@@ -176,16 +169,10 @@ For production or resource-constrained environments, enable headless mode to cap
 **Configuration (in `.env`):**
 ```bash
 BROWSER_HEADLESS=true
-TARGET_PAGE_WIDTH=1920
-TARGET_PAGE_HEIGHT=1080
+TARGET_PAGE_WIDTH_MAX=1920
+TARGET_PAGE_HEIGHT_MAX=1080
+DAEMON_ENABLE_HEADLESS_CALIBRATION=true
 ```
-
-**How it works:**
-1. Chrome launches without GUI (no window displayed)
-2. Viewport is explicitly set to capture full page width
-3. Target page scales down (via CSS `transform: scale(0.9)`) to fit viewport without horizontal scrolling
-4. Client receives scrollable video stream of the entire page
-5. Mobile client can scroll vertically to view all content
 
 **Key features:**
 - Full page width is guaranteed to be visible (no horizontal scroll on client)
@@ -193,20 +180,6 @@ TARGET_PAGE_HEIGHT=1080
 - GPU not required (runs on servers without display)
 - Ideal for headless server deployments
 
-**Test headless mode:**
-```bash
-BROWSER_HEADLESS=true TARGET_PAGE_WIDTH=1920 TARGET_PAGE_HEIGHT=1080 \
-node packages/daemon/src/cli.js \
-  --daemonId daemon-1 \
-  --clientId client-1 \
-  --signalingServer http://localhost:8095 \
-  --targetUrl http://localhost:5174/target-demo.html
-```
-
-**Viewport Customization:**
-- `TARGET_PAGE_WIDTH=2560 TARGET_PAGE_HEIGHT=1440` for higher resolution captures
-- `TARGET_PAGE_WIDTH=1280 TARGET_PAGE_HEIGHT=720` for lower bandwidth
-- Page scaling in `target-demo.html` CSS adjusts automatically based on viewport
 
 ## Development Mode
 

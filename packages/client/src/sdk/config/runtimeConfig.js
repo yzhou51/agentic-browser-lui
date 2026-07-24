@@ -9,7 +9,6 @@ export async function loadClientRuntimeConfig(runtimePath = '/client.runtime.jso
       return {};
     }
     const config = await response.json();
-    console.info(`[client] Runtime config loaded from ${runtimePath}`, config);
     return config && typeof config === 'object' ? config : {};
   } catch (error) {
     console.warn(`[client] Failed to load runtime config from ${runtimePath}:`, error.message);

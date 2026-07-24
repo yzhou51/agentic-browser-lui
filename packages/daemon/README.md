@@ -1,6 +1,6 @@
-# @agentic-browser/daemon
+# @direct-user-control/daemon
 
-Daemon sub-project for Agentic Browser P2P in pure endpoint mode.
+Daemon sub-project for Direct User Control P2P in pure endpoint mode.
 
 It provides:
 
@@ -31,7 +31,7 @@ On startup daemon writes runtime config file:
 
 - `public/daemon.config.json`
 
-And starts a local static server bound to all interfaces by default (listen host `0.0.0.0`, default port `8788`), then prints an `http://.../daemon.html?...` URL for opening the daemon control page.
+And starts a local static server bound to all interfaces by default (listen host `0.0.0.0`, default port `8080`), then prints an `http://.../daemon.html?...` URL for opening the daemon control page.
 
 The same static server also exposes browser modules from `src/daemon/` under `/daemon-src/*` for `public/daemon.js` imports.
 
@@ -75,8 +75,8 @@ For automatic share to work reliably when attaching to an existing Chrome, that 
 
 - `--remote-debugging-port=<DAEMON_CHROME_REMOTE_DEBUGGING_PORT>`
 - `--allow-http-screen-capture`
-- `--auto-select-tab-capture-source-by-title=DUC Target`
-- `--auto-select-desktop-capture-source=DUC Target`
+- `--auto-select-tab-capture-source-by-title="DUC Target"`
+- `--auto-select-desktop-capture-source="DUC Target"`
 - `--use-fake-ui-for-media-stream` (optional; recommended for test-only automation)
 - A writable `--user-data-dir` (same profile daemon is configured to use)
 
@@ -88,13 +88,15 @@ Ubuntu example (launch attached Chrome manually first):
   --user-data-dir="/tmp/daemon-chrome-profile" \
   --allow-http-screen-capture \
   --auto-select-tab-capture-source-by-title="DUC Target" \
-  --auto-select-desktop-capture-source="DUC Target"
+  --auto-select-desktop-capture-source="DUC Target" \
+  --headless=new \
+  --no-sandbox
 ```
 
 Then start daemon tool-mode with matching remote debugging port:
 
 ```bash
-node src/index.js --daemon-id daemon-1 --client-id client-1 --target-url https://example.com --timeout 120 --json-compact --remote-debugging-port=9222
+node src/index.js --sessionId test --target-url https://example.com --timeout 120 --json-compact --remote-debugging-port=9222
 ```
 
 If existing Chrome is missing these flags/policies, daemon can still operate with it, but screen share may require manual picker confirmation instead of fully automated selection.
@@ -115,21 +117,21 @@ The client sends lifecycle control messages over the OWT P2P data channel. Daemo
 
 1. Client detects `pagehide` or `beforeunload` browser event.
 2. Client sends `{ type: 'leave', payload: { clientId, reason } }` over data channel with up to 500ms delivery window.
-3. Daemon-cli page (`daemon.js`) receives message, logs it, sets `intentionalDisconnect = true`, and calls `disconnect()` to leave the signaling server.
+3. Daemon page (`daemon.js`) receives message, logs it, sets `intentionalDisconnect = true`, and calls `disconnect()` to leave the signaling server.
 4. Node daemon (`index.js` `onAgentEvent`) receives the `peer_message` event, calls `completeSession('leave', ...)`, which clears the client message timeout and notifies any session completion waiters.
 
 ### Flow: `finish`
 
 1. User clicks Finish in the client UI.
 2. Client sends `{ type: 'finish', payload: { clientId, reason } }` over data channel.
-3. Daemon-cli page receives message, sets `intentionalDisconnect = true`, and calls `disconnect()`.
+3. Daemon page receives message, sets `intentionalDisconnect = true`, and calls `disconnect()`.
 4. Node daemon receives event, captures a finish snapshot, calls `completeSession('success', ...)`, and enqueues a `finish_ack` peer notice back to the client.
 
 ### Flow: `timeout`
 
 1. Client-side inactivity timer fires after no meaningful user activity.
 2. Client sends `{ type: 'timeout', payload: { clientId, reason } }` over data channel.
-3. Daemon-cli page receives message, sets `intentionalDisconnect = true`, and calls `disconnect()`.
+3. Daemon page receives message, sets `intentionalDisconnect = true`, and calls `disconnect()`.
 4. Node daemon's own independent client message timeout may also fire and capture a snapshot if no other message has been received.
 
 ### Intentional Disconnect Flag
@@ -138,7 +140,7 @@ When daemon processes any termination message, it immediately sets `intentionalD
 
 ## HTTP Endpoints
 
-The daemon is driven by the CLI (see [Local CLI](#local-cli)); there is no external REST control API. The built-in static server exposes only what the daemon browser page needs:
+The daemon is driven by the CLI (see [Local CLI](#local-cli)); there is no external REST control API. The built-in static server exposes only what the daemon page needs:
 
 - `GET /` and static assets under `public/` (serves `daemon.html`, `daemon.js`, vendored libs), plus browser modules under `/daemon-src/*` and client SDK under `/client-sdk/*`.
 - `GET /daemon.config.json` — runtime config (ids, signaling server, ICE, timeout) the page reads on load.
@@ -180,20 +182,13 @@ When started in tool mode, the daemon records and updates `activeSession.stage` 
 ### Tool-mode flags
 
 - Required:
-  - `--daemon-id <id>`
-  - `--client-id <id>`
+  - `--sessionId <id>`
   - `--target-url <url>`
-- Optional:
   - `--timeout <seconds>`
-  - `--session-id <id>`
-  - `--signaling-server <url>`
-  - `--stun-urls <csv>`
-  - `--turn-urls <csv>`
-  - `--turn-username <value>`
-  - `--turn-credential <value>`
+  - `--remote-debugging-port <port>`
+- Optional:
   - `--chrome <path>`
   - `--chrome-params <json-array>`
-  - `--remote-debugging-port <port>`
   - `--json-compact`
 
 ### Tool-mode result schema (for LLM)
@@ -246,13 +241,6 @@ Status values:
 
 Tool-mode optional params:
 
-- `--timeout <seconds>`
-- `--session-id <id>`
-- `--signaling-server <url>`
-- `--stun-urls <csv>`
-- `--turn-urls <csv>`
-- `--turn-username <value>`
-- `--turn-credential <value>`
 - `--chrome <path>`
 - `--chrome-params <json-string-array>`
 - `--json-compact` (print single-line JSON output for machine parsing)

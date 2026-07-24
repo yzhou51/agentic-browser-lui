@@ -657,7 +657,6 @@ export class BrowserController {
       let url = '';
       try {
         url = String(entry.url() || '');
-        logger.debug(`closeDaemonPage: checking page URL: ${url}`);
       } catch {
         continue;
       }
@@ -671,6 +670,7 @@ export class BrowserController {
         continue;
       }
       try {
+        logger.info(`closeDaemonPage: close daemon page URL: ${url}`);
         await entry.close();
       } catch (error) {
         logger.warn(`closeDaemonPage: failed to close page: ${error.message}`);

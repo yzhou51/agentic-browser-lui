@@ -178,14 +178,6 @@ export class DirectUserControlClient {
       const p2p = await this.transport.connect();
       p2p.allowedRemoteIds = this.daemonId ? [this.daemonId] : [];
 
-      console.debug('[client-sdk] connecting', {
-        clientId: this.clientId,
-        daemonId: this.daemonId,
-        signalingHost: nextOptions.signalingHost,
-        rtcConfiguration: nextOptions.rtcConfiguration,
-        allowedRemoteIds: p2p.allowedRemoteIds,
-      });
-
       return this.clientId;
     })();
 

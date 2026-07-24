@@ -17,8 +17,8 @@ export const SESSION_STAGES = {
 // ready/completion waiter queues, and termination cleanup. index.js drives the
 // session flow and message routing; this class holds the state those steps mutate.
 export class SessionManager {
-  constructor({ browser, daemonPageBridge, logger, config, getFallbackClientId }) {
-    this.browser = browser;
+  constructor({ browserController, daemonPageBridge, logger, config, getFallbackClientId }) {
+    this.browserCtrl = browserController;
     this.daemonPageBridge = daemonPageBridge;
     this.logger = logger;
     this.config = config;
@@ -176,7 +176,7 @@ export class SessionManager {
 
     // Capture snapshot
     try {
-      const snapshot = await this.browser.saveTargetSnapshotToFile({
+      const snapshot = await this.browserCtrl.saveTargetSnapshotToFile({
         fullPage: true,
         outputDir: this.config.timeoutSnapshotDir,
         fileNamePrefix: snapshotPrefix,
@@ -195,7 +195,7 @@ export class SessionManager {
     // the CDP connection, making page.close() fail. The target page and the browser
     // itself are intentionally left untouched here.
     try {
-      await this.browser.closeDaemonPage();
+      await this.browserCtrl.closeDaemonPage();
     } catch (error) {
       this.logger.warn(`Failed to close daemon page on ${outcome}.`, {
         error: error.message,
@@ -462,7 +462,7 @@ export class SessionManager {
       });
 
       try {
-        const snapshot = await this.browser.saveTargetSnapshotToFile({
+        const snapshot = await this.browserCtrl.saveTargetSnapshotToFile({
           fullPage: true,
           outputDir: this.config.timeoutSnapshotDir,
           fileNamePrefix: `timeout-${fallbackClientId || 'client'}`,

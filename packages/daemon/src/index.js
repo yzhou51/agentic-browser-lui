@@ -25,13 +25,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const logger = createLogger('daemon-runtime');
 
-const browser = new BrowserController({
+const browserCtrl = new BrowserController({
   headless: config.browserHeadless,
   enableHeadlessCalibration: config.enableHeadlessCalibration,
   maxPageWidth: config.targetPageWidthMax,
   maxPageHeight: config.targetPageHeightMax,
 });
-const commands = new CommandProcessor(browser);
+const commands = new CommandProcessor(browserCtrl);
 const daemonPageBridge = new DaemonPageBridge({
   initialState: {
     daemonId: config.daemonId,
@@ -60,7 +60,7 @@ const session = {
 };
 
 const sessionManager = new SessionManager({
-  browser,
+  browserController: browserCtrl,
   daemonPageBridge,
   logger,
   config,
@@ -262,8 +262,8 @@ const cli = buildCli({
     signalingServer: session.signalingServer,
     staticServerHost: session.staticServerHost,
     staticServerPort: session.staticServerPort,
-    browserLaunched: Boolean(browser.browser),
-    pageOpen: Boolean(browser.page),
+    browserLaunched: Boolean(browserCtrl.browser),
+    pageOpen: Boolean(browserCtrl.page),
   }),
   submitCommand: (command) => commands.handle(command),
 });
@@ -291,8 +291,8 @@ if (process.argv.length > 2 && !toolModePayload) {
     getDaemonConfig: () => ({
       ...session,
       headless: config.browserHeadless,
-      runtimeMode: browser.getRuntimeMode(),
-      browserConnectionMode: browser.browserConnectionMode,
+      runtimeMode: browserCtrl.getRuntimeMode(),
+      browserConnectionMode: browserCtrl.browserConnectionMode,
       // Prefer the active session's timeout: it is assigned early in
       // startSessionWorkflow (before the daemon page is opened and fetches
       // this config), whereas currentClientMessageTimeoutMs is only armed later.
@@ -556,13 +556,13 @@ if (process.argv.length > 2 && !toolModePayload) {
     const toolModeRuntime = options.toolModeRuntime || null;
     const preserveBrowser = Object.prototype.hasOwnProperty.call(options, 'preserveBrowser')
       ? Boolean(options.preserveBrowser)
-      : browser.shouldPreserveBrowserOnExit();
+      : browserCtrl.shouldPreserveBrowserOnExit();
     const code = Number.isInteger(exitCode) ? exitCode : (Number.isInteger(process.exitCode) ? process.exitCode : 0);
     shuttingDown = true;
 
     // Absolute failsafe: whatever throws or blocks below, guarantee the process
     // terminates. unref() so this timer never itself keeps the event loop alive.
-    // Without this, a stalled browser.disconnect()/server.close() (or a throw
+    // Without this, a stalled browserCtrl.disconnect()/server.close() (or a throw
     // before process.exit) leaves the HTTP server, Chrome CDP socket and timers
     // holding the loop open -- the daemon hangs and never exits.
     const forceExitTimer = setTimeout(() => {
@@ -583,12 +583,12 @@ if (process.argv.length > 2 && !toolModePayload) {
           await toolModeRuntime.shutdownBrowser();
         } else if (preserveBrowser) {
           await new RemoteDevtoolsMode({
-            browser,
+            browserController: browserCtrl,
             logger,
-            requestedRemoteDebuggingPort: browser.remoteDebuggingPort,
+            requestedRemoteDebuggingPort: browserCtrl.remoteDebuggingPort,
           }).shutdownBrowser();
         } else {
-          await new PuppeteerMode({ browser, logger, reason: 'default runtime shutdown' }).shutdownBrowser();
+          await new PuppeteerMode({ browserController: browserCtrl, logger, reason: 'default runtime shutdown' }).shutdownBrowser();
         }
       } catch (error) {
         logger.warn('Browser shutdown reported an error; continuing to exit.', {
@@ -654,9 +654,9 @@ if (process.argv.length > 2 && !toolModePayload) {
       headless: session.headless,
     },
     browserController: {
-      headless: browser.headless,
-      mode: browser.mode,
-      connectionMode: browser.browserConnectionMode,
+      headless: browserCtrl.headless,
+      mode: browserCtrl.mode,
+      connectionMode: browserCtrl.browserConnectionMode,
     },
   });
 
@@ -687,14 +687,14 @@ if (process.argv.length > 2 && !toolModePayload) {
         daemonPage: 'daemon.html',
       });
       const toolModeRuntime = createToolModeRuntime({
-        browser,
+        browserController: browserCtrl,
         logger,
         requestedRemoteDebuggingPort: toolModePayload.remoteDebuggingPort,
       });
       logger.info('Tool-mode runtime selected', {
         mode: toolModeRuntime.name,
         requestedRemoteDebuggingPort: toolModePayload.remoteDebuggingPort,
-        browserConnectionMode: browser.browserConnectionMode,
+        browserConnectionMode: browserCtrl.browserConnectionMode,
       });
 
       const completion = await sessionManager.waitForSessionCompletion(Math.max(activeSession.timeoutMs + 60000, activeSession.timeoutMs));
@@ -721,7 +721,7 @@ if (process.argv.length > 2 && !toolModePayload) {
         message: error.message,
       }, { compact: Boolean(toolModePayload.jsonCompact), isError: true });
       const toolModeRuntime = createToolModeRuntime({
-        browser,
+        browserController: browserCtrl,
         logger,
         requestedRemoteDebuggingPort: toolModePayload.remoteDebuggingPort,
       });

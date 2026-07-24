@@ -238,7 +238,7 @@ export function createOwtP2PTransport({
       await p2p.send(targetId, payload);
     } catch (error) {
       const errorMessage = String(error?.message || error || 'Unknown send error');
-      console.log('[channel-verify] SEND via DATA channel (p2p) -> FAILED', {
+      console.error('[channel-verify] SEND via DATA channel (p2p) -> FAILED', {
         target: targetId,
         type: messageType || 'unknown',
         error: errorMessage,

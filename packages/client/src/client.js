@@ -320,7 +320,7 @@ async function init() {
   function startSessionCountdown(timeoutMs) {
     const rawMs = Number(timeoutMs);
     if (!Number.isFinite(rawMs) || rawMs <= 0) {
-      console.debug('[client] countdown not started: invalid timeoutMs', timeoutMs);
+      log(`[client] countdown not started: invalid timeoutMs ${timeoutMs}`);
       return;
     }
 
@@ -747,7 +747,7 @@ async function init() {
     };
     
     if (type === 'mouse_move') {
-      console.debug('[sendMappedMouseCommand] mouse_move', {
+      let data = {
         transmitted: {
           x: 'set by mapping',
           y: 'set by mapping',
@@ -760,8 +760,9 @@ async function init() {
         },
         clientLocal: {
           isDragging: extraPayload.isDragging,
-        },
-      });
+        }
+      };
+      log('[sendMappedMouseCommand] mouse_move: ' + JSON.stringify(data));
     }
     
     return sendMouseCommand(type, event, fullPayload);

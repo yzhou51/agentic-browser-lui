@@ -59,7 +59,7 @@ export class InputController {
       throw new Error('No open page is available for Backspace.');
     }
 
-    logger.debug('Deleting backward in active page.');
+    logger.info('Deleting backward in active page.');
 
     try {
       await page.bringToFront();
