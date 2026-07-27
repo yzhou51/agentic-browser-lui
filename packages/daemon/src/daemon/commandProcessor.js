@@ -54,7 +54,7 @@ export class CommandProcessor {
     logger.debug('[daemon] command received', {
       type,
       payloadType: payload instanceof ArrayBuffer ? 'binary' : 'json',
-      requestId: command.requestId,
+      reqId: command.reqId,
     });
 
     try {
@@ -208,7 +208,7 @@ export class CommandProcessor {
       logger.error('[daemon] command failed', {
         type,
         payload,
-        requestId: command.requestId,
+        reqId: command.reqId,
         error: error.message,
       });
       throw error;

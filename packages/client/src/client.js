@@ -181,7 +181,7 @@ async function init() {
     ducClient.setDaemonId(daemonId);
     const leaveMessage = {
       type: 'leave',
-      requestId: `leave-${Date.now()}`,
+      reqId: `leave-${Date.now()}`,
       payload: {
         clientId: getClientId(),
         reason,
@@ -213,7 +213,7 @@ async function init() {
     await ducClient.sendMessage(
       {
         type: 'finish',
-        requestId: `finish-${Date.now()}`,
+        reqId: `finish-${Date.now()}`,
         payload: {
           clientId: getClientId(),
           reason,
@@ -351,7 +351,7 @@ async function init() {
     resolveAttempts += 1;
     const resolveMessage = {
       type: 'resolve',
-      requestId: `resolve-${Date.now()}-${resolveAttempts}`,
+      reqId: `resolve-${resolveAttempts}`,
       payload: {
         clientId: getClientId(),
       },
@@ -1127,8 +1127,8 @@ async function init() {
       return;
     }
 
-    const requestId = await ducClient.sendCommand('text_input', { text });
-    log(`text_input sent (${requestId}): ${JSON.stringify(text)}`);
+    const reqId = await ducClient.sendCommand('text_input', { text });
+    log(`text_input sent (${reqId}): ${JSON.stringify(text)}`);
   }
 
   async function sendKeyPress(key) {
@@ -1137,8 +1137,8 @@ async function init() {
       return;
     }
 
-    const requestId = await ducClient.sendCommand('key_press', { key });
-    log(`key_press sent (${requestId}): ${key}`);
+    const reqId = await ducClient.sendCommand('key_press', { key });
+    log(`key_press sent (${reqId}): ${key}`);
   }
 
   const sendMouseCommand = createViewerMouseCommandSender({
@@ -1169,11 +1169,11 @@ async function init() {
         );
       }
     },
-    onAfterSend: ({ type, requestId, payload, mapped }) => {
+    onAfterSend: ({ type, reqId, payload, mapped }) => {
       if (type === 'mouse_click') {
-        log(`${type} sent (${requestId}): x=${payload.x} y=${payload.y} source=${payload.sourceWidth}x${payload.sourceHeight}`);
+        log(`${type} sent (${reqId}): x=${payload.x} y=${payload.y} source=${payload.sourceWidth}x${payload.sourceHeight}`);
       } else if (type !== 'mouse_move') {
-        log(`${type} sent (${requestId}).`);
+        log(`${type} sent (${reqId}).`);
       }
     },
   });
@@ -1391,7 +1391,7 @@ async function init() {
             try {
               await ducClient.sendMessage({
                 type: 'calibrate_result',
-                requestId: parsed.requestId,
+                reqId: parsed.reqId,
                 payload: detection,
               });
             } catch (error) {
@@ -1409,7 +1409,7 @@ async function init() {
         clearResolveRetryTimer();
         setClientState('daemonConnected', 'Resolve acknowledged by daemon. Waiting for result...');
         log(`Resolve acknowledged by daemon. Waiting for result...`);
-        console.log('[client] resolve_ack received', { requestId: parsed.requestId });
+        console.log('[client] resolve_ack received', { reqId: parsed.reqId });
         return;
       }
       if (parsed.type === 'resolve_result') {
@@ -1451,7 +1451,7 @@ async function init() {
       }
       if (parsed.type === 'command_result') {
         log(
-          `Result "${parsed.requestId || 'n/a'}" from "${origin}": ${parsed.ok ? 'ok' : 'failed'} ` +
+          `Result "${parsed.reqId || 'n/a'}" from "${origin}": ${parsed.ok ? 'ok' : 'failed'} ` +
           `${parsed.error ? `(${parsed.error})` : ''}`
         );
         return;

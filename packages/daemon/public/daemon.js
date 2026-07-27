@@ -1,7 +1,11 @@
 /* global Owt */
 
 import { DirectUserControlClient } from '/client-sdk/DirectUserControlClient.js';
-import { decodeMouseCommand } from '/client-sdk/input/mouseCommandCodec.js';
+import {
+  decodeMouseCommand,
+  isMouseCommandString,
+  decodeMouseCommandString,
+} from '/client-sdk/input/mouseCommandCodec.js';
 
 async function loadRuntimeConfig() {
   try {
@@ -206,8 +210,8 @@ async function loadRuntimeConfig() {
         return;
       }
 
-      const requestId = `calib-${Date.now()}`;
-      pendingCalibrationRequestId = requestId;
+      const reqId = `calib-${Date.now()}`;
+      pendingCalibrationRequestId = reqId;
       pendingCalibrationClientId = clientId;
       pendingCalibrationAttempt = attempt;
 
@@ -215,7 +219,7 @@ async function loadRuntimeConfig() {
         clientId,
         {
           type: 'calibrate_request',
-          requestId,
+          reqId,
           payload: { markers },
         },
         { label: 'calibrate_request' }
@@ -250,7 +254,7 @@ async function loadRuntimeConfig() {
 
   async function handleCalibrationResult(incomingOrigin, command) {
     const payload = command?.payload || {};
-    if (!pendingCalibrationRequestId || command.requestId !== pendingCalibrationRequestId) {
+    if (!pendingCalibrationRequestId || command.reqId !== pendingCalibrationRequestId) {
       return;
     }
     const attempt = Math.max(1, Number(pendingCalibrationAttempt || 1));
@@ -331,7 +335,7 @@ async function loadRuntimeConfig() {
       clientId,
       {
         type: 'daemon_online',
-        requestId: `daemon-online-${Date.now()}`,
+        reqId: `daemon-online-${Date.now()}`,
         payload: {
           daemonId,
           clientId,
@@ -387,22 +391,18 @@ async function loadRuntimeConfig() {
     }
 
     if (typeof rawMessage === 'string') {
-      const parsed = JSON.parse(rawMessage);
-      if (parsed.__isBinary && typeof parsed.payload === 'string') {
-        const base64Data = parsed.payload;
-        const binaryString = atob(base64Data);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let index = 0; index < binaryString.length; index += 1) {
-          bytes[index] = binaryString.charCodeAt(index);
-        }
-        const decoded = decodeMouseCommand(bytes.buffer);
+      // Compact bare-string mouse command (PREFIX + base64). Detected by its
+      // sentinel prefix so we skip JSON.parse entirely.
+      if (isMouseCommandString(rawMessage)) {
+        const decoded = decodeMouseCommandString(rawMessage);
         if (!decoded) {
-          throw new Error('Failed to decode binary message');
+          throw new Error('Failed to decode compact mouse command string');
         }
         const { commandType, ...fields } = decoded;
         return { type: commandType, payload: fields };
       }
-      return parsed;
+
+      return JSON.parse(rawMessage);
     }
 
     if (rawMessage instanceof ArrayBuffer) {
@@ -659,7 +659,7 @@ async function loadRuntimeConfig() {
         incomingOrigin,
         {
           type: 'resolve_ack',
-          requestId: command.requestId,
+          reqId: command.reqId,
         },
         { label: 'resolve_ack' }
       );
@@ -682,7 +682,7 @@ async function loadRuntimeConfig() {
         incomingOrigin,
         {
           type: 'resolve_result',
-          requestId: command.requestId,
+          reqId: command.reqId,
           ok: true,
           result: {
             message: 'resolve accepted; sharing started',
@@ -693,7 +693,7 @@ async function loadRuntimeConfig() {
 
       postAgentEvent({
         kind: 'peer_command_result',
-        requestId: command.requestId,
+        reqId: command.reqId,
         type: 'resolve',
         ok: true,
         message: 'resolve accepted; sharing started',
@@ -707,7 +707,7 @@ async function loadRuntimeConfig() {
         incomingOrigin,
         {
           type: 'resolve_result',
-          requestId: command.requestId,
+          reqId: command.reqId,
           ok: false,
           error: resolveError.message,
         },
@@ -716,7 +716,7 @@ async function loadRuntimeConfig() {
 
       postAgentEvent({
         kind: 'peer_command_result',
-        requestId: command.requestId,
+        reqId: command.reqId,
         type: 'resolve',
         ok: false,
         message: '',
@@ -745,7 +745,7 @@ async function loadRuntimeConfig() {
     if (normalizedType !== 'mouse_move') {
       postAgentEvent({
         kind: 'peer_command_result',
-        requestId: command.requestId,
+        reqId: command.reqId,
         type: command.type,
         ok: body?.ok !== false,
         message: body?.message || '',
@@ -757,7 +757,7 @@ async function loadRuntimeConfig() {
         incomingOrigin,
         {
           type: 'command_result',
-          requestId: command.requestId,
+          reqId: command.reqId,
           ok: body.ok !== false,
           result: body,
         },
@@ -943,7 +943,7 @@ async function loadRuntimeConfig() {
         }
 
         const noticeType = String(payload.type || 'notice').trim();
-        const requestId = String(payload.requestId || `${noticeType}-${Date.now()}`).trim();
+        const reqId = String(payload.reqId || `${noticeType}-${Date.now()}`).trim();
         const message = String(payload.message || '').trim();
         const noticePayload = payload.payload && typeof payload.payload === 'object' ? payload.payload : {};
 
@@ -951,7 +951,7 @@ async function loadRuntimeConfig() {
           targetId,
           {
             type: noticeType,
-            requestId,
+            reqId,
             message,
             payload: noticePayload,
           },

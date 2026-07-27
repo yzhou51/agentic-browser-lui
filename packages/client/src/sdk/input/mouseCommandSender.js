@@ -86,7 +86,7 @@ export function createViewerMouseCommandSender({
     let transmitPayload = payload;
     let usedBinaryEncoding = false;
 
-    if (type === 'mouse_move') {
+    if (type === 'mouse_move' || type === 'mouse_click' || type === 'mouse_down' || type === 'mouse_up') {
       transmitPayload = encodeMouseCommand(
         type,
         payload.x,
@@ -98,20 +98,20 @@ export function createViewerMouseCommandSender({
       usedBinaryEncoding = true;
     }
 
-    const requestId = await sendCommand(type, transmitPayload);
+    const reqId = await sendCommand(type, transmitPayload);
 
     if (onAfterSend) {
       onAfterSend({
         type,
         payload,
         mapped,
-        requestId,
+        reqId,
         pointerEvent,
         extraPayload,
         format: usedBinaryEncoding ? 'binary' : 'json',
       });
     }
 
-    return { requestId, payload, mapped };
+    return { reqId, payload, mapped };
   };
 }

@@ -193,7 +193,7 @@ async function startSessionWorkflow(payload = {}) {
   }
 
   sessionManager.updateProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'running', 'connecting to signaling server');
-  const requestId = `${sessionId}-connect`;
+  const reqId = `${sessionId}-connect`;
   const connectCommand = daemonPageBridge.enqueue('connect_only', {
     daemonId,
     clientId,
@@ -202,7 +202,7 @@ async function startSessionWorkflow(payload = {}) {
     turnUrls,
     turnUsername,
     turnCredential,
-    requestId,
+    reqId,
   });
 
   sessionManager.armClientMessageTimeout('session_start', timeoutMs);
@@ -360,7 +360,7 @@ if (process.argv.length > 2 && !toolModePayload) {
           const parsed = JSON.parse(rawMessage);
           parsedPayload = parsed;
           parsedType = String(parsed?.type || '').trim().toLowerCase();
-          parsedRequestId = String(parsed?.requestId || '');
+          parsedRequestId = String(parsed?.reqId || '');
         } catch {
           // Keep raw message logging even for non-JSON payloads.
         }
@@ -368,7 +368,7 @@ if (process.argv.length > 2 && !toolModePayload) {
         logger.debug('daemon peer message received', {
           origin: String(event?.origin || ''),
           type: parsedType,
-          requestId: parsedRequestId,
+          reqId: parsedRequestId,
           bytes: messageBytes,
         });
 
@@ -415,7 +415,7 @@ if (process.argv.length > 2 && !toolModePayload) {
           logger.info('RESOLVE_RECEIVED', {
             origin: String(event?.origin || ''),
             payloadClientId,
-            requestId: parsedRequestId,
+            reqId: parsedRequestId,
             bytes: messageBytes,
           });
         } else if (parsedType === 'finish') {
@@ -440,7 +440,7 @@ if (process.argv.length > 2 && !toolModePayload) {
             payloadClientId,
             acceptedFinish,
             earlyFinishForActiveSession,
-            requestId: parsedRequestId,
+            reqId: parsedRequestId,
             bytes: messageBytes,
           });
         } else if (parsedType === 'leave') {
@@ -465,7 +465,7 @@ if (process.argv.length > 2 && !toolModePayload) {
             payloadClientId,
             scheduledLeave,
             graceMs: config.leaveGraceMs,
-            requestId: parsedRequestId,
+            reqId: parsedRequestId,
             bytes: messageBytes,
           });
         } else if (parsedType === 'timeout') {
@@ -485,13 +485,13 @@ if (process.argv.length > 2 && !toolModePayload) {
             origin: String(event?.origin || ''),
             payloadClientId,
             acceptedTimeout,
-            requestId: parsedRequestId,
+            reqId: parsedRequestId,
             bytes: messageBytes,
           });
         } else if (parsedType === 'connect_only') {
           logger.info('TAKE_ACTION_CONNECT_ONLY_RECEIVED', {
             origin: String(event?.origin || ''),
-            requestId: parsedRequestId,
+            reqId: parsedRequestId,
             bytes: messageBytes,
           });
         }
@@ -502,7 +502,7 @@ if (process.argv.length > 2 && !toolModePayload) {
       if (kind === 'peer_command_result') {
         const resultType = String(event?.type || '').trim().toLowerCase();
         logger.debug('daemon peer command result', {
-          requestId: String(event?.requestId || ''),
+          reqId: String(event?.reqId || ''),
           type: resultType,
           ok: event?.ok !== false,
           message: String(event?.message || ''),
@@ -513,24 +513,24 @@ if (process.argv.length > 2 && !toolModePayload) {
         if (resultType === 'resolve') {
           if (event?.ok !== false) {
             logger.info('RESOLVE_SHARE_STARTED', {
-              requestId: String(event?.requestId || ''),
+              reqId: String(event?.reqId || ''),
               message: String(event?.message || ''),
             });
           } else {
             logger.error('RESOLVE_SHARE_FAILED', {
-              requestId: String(event?.requestId || ''),
+              reqId: String(event?.reqId || ''),
               error: String(event?.error || ''),
             });
           }
         } else if (resultType === 'connect_only') {
           if (event?.ok !== false) {
             logger.info('TAKE_ACTION_SIGNALING_CONNECTED', {
-              requestId: String(event?.requestId || ''),
+              reqId: String(event?.reqId || ''),
               message: String(event?.message || ''),
             });
           } else {
             logger.error('TAKE_ACTION_SIGNALING_CONNECT_FAILED', {
-              requestId: String(event?.requestId || ''),
+              reqId: String(event?.reqId || ''),
               error: String(event?.error || ''),
             });
           }

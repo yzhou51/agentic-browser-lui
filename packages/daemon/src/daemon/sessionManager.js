@@ -135,7 +135,7 @@ export class SessionManager {
     return this.daemonPageBridge.enqueue('send_peer_notice', {
       targetId,
       type,
-      requestId: `${type}-${Date.now()}`,
+      reqId: `${type}-${Date.now()}`,
       message,
       payload: {
         clientId: targetId,

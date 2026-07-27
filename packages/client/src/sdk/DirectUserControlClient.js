@@ -1,6 +1,7 @@
 import { normalizeRtcIceOptions } from './config/rtcConfig.js';
 import { createOwtP2PTransport } from './transport/owtP2PTransport.js';
 import { SIGNALING_MESSAGE_TYPES, resolveMessageType } from './transport/signalingMessages.js';
+import { encodeMouseCommandString } from './input/mouseCommandCodec.js';
 
 export class DirectUserControlClient {
   // Session identity + caller-supplied event callbacks (the public event API).
@@ -228,14 +229,18 @@ export class DirectUserControlClient {
   }
 
   async sendCommand(type, payload = {}) {
-    const requestId = `cmd-${Date.now()}-${++this.#requestSeq}`;
-    const command = { type, payload, requestId };
+    const reqId = `cmd-${++this.#requestSeq}`;
+    const command = { type, payload, reqId };
     await this.sendMessage(command);
-    return requestId;
+    return reqId;
   }
 
   // Wrap an outgoing message for transport. ArrayBuffer payloads (binary mouse
-  // commands) are base64-encoded and flagged so the daemon can decode them.
+  // commands) are sent as a compact bare string -- PREFIX + base64 -- instead of
+  // a JSON envelope: the command type is already encoded in byte 0 and these
+  // commands are fire-and-forget, so type/payload/reqId keys are pure
+  // overhead. This drops our ~70-byte wrapper and avoids OWT double-escaping the
+  // nested JSON quotes when it wraps the message in its own {id,data} envelope.
   #serializeOutgoingMessage(message) {
     const isBinaryPayload =
       typeof message === 'object' &&
@@ -247,13 +252,7 @@ export class DirectUserControlClient {
       return message;
     }
 
-    const binaryData = new Uint8Array(message.payload);
-    const base64Data = btoa(String.fromCharCode(...binaryData));
-    return {
-      ...message,
-      payload: base64Data,
-      __isBinary: true,
-    };
+    return encodeMouseCommandString(message.payload);
   }
 
   async sendMessage(message, targetId) {
