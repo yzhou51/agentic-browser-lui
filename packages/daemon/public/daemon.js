@@ -462,8 +462,8 @@ async function loadRuntimeConfig() {
 
     return ducClient.connect({
       signalingHost,
-      clientId: daemonId,
-      daemonId: clientId,
+      localId: daemonId,
+      remoteId: clientId,
       stunUrls: stunUrlsInput?.value || '',
       turnUrls: turnUrlsInput?.value || '',
       turnUsername: turnUsernameInput?.value || '',
@@ -477,7 +477,7 @@ async function loadRuntimeConfig() {
   }
 
   async function shareScreen({ automated = false } = {}) {
-    if (!ducClient.getClient()) {
+    if (!ducClient.hasClient()) {
       setStatus('Connect first.');
       return;
     }
@@ -522,13 +522,7 @@ async function loadRuntimeConfig() {
       new Owt.Base.StreamSourceInfo('screen-cast', 'screen-cast')
     );
 
-    const p2p = ducClient.getClient();
-    const publishTargetId = String(remoteInput?.value || '').trim();
-    if (!publishTargetId) {
-      throw new Error('clientId is required before share publish.');
-    }
-
-    await p2p.publish(publishTargetId, screenStream);
+    await ducClient.publishStream(remoteInput?.value, screenStream);
 
     setStatus('Screen stream published.');
     await postDaemonPageEvent({
@@ -660,15 +654,8 @@ async function loadRuntimeConfig() {
       if (refreshReconnectPending) {
         refreshReconnectPending = false;
         const staleClientId = String(incomingOrigin || remoteInput?.value || '').trim();
-        const p2p = ducClient.getClient();
-        if (p2p && typeof p2p.stop === 'function' && staleClientId) {
-          try {
-            p2p.stop(staleClientId);
-            appendMessage(`Refresh reconnect: reset stale P2P connection to ${staleClientId}.`);
-          } catch (error) {
-            appendMessage(`Refresh reconnect: failed to reset P2P connection: ${error?.message || error}`);
-          }
-        }
+        const msg = ducClient.stop(staleClientId);
+        appendMessage(`Refresh reconnect: ${msg}.`);
       }
 
       await sendPeerMessage(

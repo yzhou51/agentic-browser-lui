@@ -180,7 +180,7 @@ async function init() {
     }
 
     leaveSent = true;
-    ducClient.setDaemonId(daemonId);
+    ducClient.setRemoteId(daemonId);
     const leaveMessage = {
       type: 'leave',
       reqId: `leave-${Date.now()}`,
@@ -210,7 +210,7 @@ async function init() {
       throw new Error('not connected to daemon.');
     }
 
-    ducClient.setDaemonId(daemonId);
+    ducClient.setRemoteId(daemonId);
     await ducClient.sendMessage(
       {
         type: 'finish',
@@ -1378,7 +1378,7 @@ async function init() {
       if (parsed.type === 'daemon_online') {
         const daemonId = String(parsed?.payload?.daemonId || getDaemonId()).trim();
         if (daemonId) {
-          ducClient.setDaemonId(daemonId);
+          ducClient.setRemoteId(daemonId);
         }
         daemonReadyHint = true;
         startSessionCountdown(parsed?.payload?.timeoutMs);
@@ -2162,8 +2162,8 @@ async function init() {
 
     ducClient.connect({
       signalingHost: getSignalingUrl(),
-      clientId: getClientId(),
-      daemonId: getDaemonId(),
+      localId: getClientId(),
+      remoteId: getDaemonId(),
       ...rtcOptions,
     }).then(() => {
       connected = true;
