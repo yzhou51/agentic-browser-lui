@@ -7,6 +7,18 @@
   <title>Direct User Control</title>
   <link rel="stylesheet" href="/src/styles.css" />
   <style>
+    /* Intel-style blue palette (scoped to this page). */
+    :root {
+      --intel-blue: #0068b5;
+      --intel-blue-strong: #0071c5;
+      --intel-blue-deep: #003c71;
+      --intel-blue-light: #00c7fd;
+      --intel-blue-hi: #2ea3e0;
+      --intel-ink: #cfe9fb;
+      --intel-track: rgba(0, 199, 253, 0.16);
+      --intel-line: rgba(0, 199, 253, 0.34);
+    }
+
     html,
     body {
       height: 100%;
@@ -37,8 +49,8 @@
       font-size: 16px;
       line-height: 1.1;
       letter-spacing: 0.03em;
-      color: #d1fae5;
-      text-shadow: 0 2px 10px rgba(16, 185, 129, 0.22);
+      color: var(--intel-ink);
+      text-shadow: 0 2px 10px rgba(0, 104, 181, 0.28);
     }
 
     .mobile-header {
@@ -48,8 +60,8 @@
       margin: 0 0 6px;
       padding: 4px 8px;
       border-radius: 10px;
-      background: rgba(5, 28, 22, 0.42);
-      border: 1px solid rgba(16, 185, 129, 0.28);
+      background: rgba(0, 60, 113, 0.30);
+      border: 1px solid var(--intel-line);
     }
 
     .mobile-timeout-countdown {
@@ -61,9 +73,9 @@
       font-weight: 600;
       letter-spacing: 0.02em;
       white-space: nowrap;
-      color: #d1fae5;
-      background: rgba(16, 185, 129, 0.16);
-      border: 1px solid rgba(16, 185, 129, 0.32);
+      color: var(--intel-ink);
+      background: rgba(0, 199, 253, 0.14);
+      border: 1px solid var(--intel-line);
     }
 
     .mobile-timeout-countdown[data-state="warn"] {
@@ -134,22 +146,51 @@
       display: block;
     }
 
-    .mobile-terminal-banner {
-      display: none;
-      position: relative;
-      z-index: 4;
+    /* One-line status bar: status text (left) + time-left countdown (right). */
+    .mobile-status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
       margin: 0 0 8px;
-      padding: 7px 9px;
-      border-radius: 10px;
-      background: rgba(11, 18, 36, 0.9);
-      border: 1px solid rgba(245, 158, 11, 0.5);
-      color: #f8fafc;
-      font-size: 13px;
-      line-height: 1.35;
+      min-height: 24px;
     }
 
-    .mobile-terminal-banner.is-visible {
-      display: block;
+    .mobile-status-notice {
+      flex: 1 1 auto;
+      min-width: 0;
+      text-align: left;
+      font-size: 13px;
+      line-height: 1.35;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--intel-ink);
+      opacity: 0;
+      transition: opacity 140ms ease, color 140ms ease;
+    }
+
+    .mobile-status-notice.is-visible {
+      opacity: 1;
+    }
+
+    /* Tones: info (default) = Intel light; active = sharing; warn/error = amber/red. */
+    .mobile-status-notice[data-state="info"] {
+      color: var(--intel-ink);
+    }
+
+    .mobile-status-notice[data-state="active"] {
+      color: #86efac;
+    }
+
+    .mobile-status-notice[data-state="warn"] {
+      color: #fcd34d;
+    }
+
+    .mobile-status-notice[data-state="error"] {
+      color: #fca5a5;
     }
 
     .mobile-video {
@@ -159,10 +200,13 @@
       max-width: none;
       flex: 0 0 auto;
       border-radius: 12px;
-      border: 1px solid #22324d;
-      background: #02040a;
+      border: 1px solid rgba(0, 104, 181, 0.55);
+      background: #ffffff;
       object-fit: contain;
       touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-touch-callout: none;
+      user-select: none;
     }
 
     #remoteVideo.mobile-video {
@@ -186,13 +230,14 @@
       align-items: flex-start;
       justify-content: flex-start;
       border-radius: 12px;
-      border: 2px solid #10b981;
-      background: #02040a;
+      border: 2px solid var(--intel-blue);
+      background: #ffffff;
       box-shadow:
-        0 0 0 2px rgba(5, 150, 105, 0.35),
-        0 12px 28px rgba(2, 6, 23, 0.48);
+        0 0 0 2px rgba(0, 104, 181, 0.30),
+        0 12px 28px rgba(2, 6, 23, 0.40);
       scrollbar-width: auto;
-      scrollbar-color: #f59e0b #0b1224;
+      /* thumb / track -- track transparent, Intel-blue thumb */
+      scrollbar-color: var(--intel-blue) transparent;
     }
 
     .mobile-video-scroll::-webkit-scrollbar {
@@ -201,13 +246,44 @@
     }
 
     .mobile-video-scroll::-webkit-scrollbar-track {
-      background: #0b1224;
+      background: transparent;
       border-radius: 999px;
     }
 
+    /* Thumb stays hidden until the surface is hovered or actively scrolled. */
     .mobile-video-scroll::-webkit-scrollbar-thumb {
-      background: #f59e0b;
+      background: transparent;
       border-radius: 999px;
+      transition: background 140ms ease;
+    }
+
+    /* Desktop / mouse only: touch devices have no hover, so gate the reveal to
+       pointer devices. On phones the custom overlay scrollbars below are the
+       affordance (shown on drag, auto-hidden), so we don't need the native one. */
+    @media (hover: hover) and (pointer: fine) {
+      .mobile-video-scroll:hover::-webkit-scrollbar-thumb,
+      .mobile-video-scroll:active::-webkit-scrollbar-thumb {
+        background: var(--intel-blue);
+      }
+
+      .mobile-video-scroll::-webkit-scrollbar-thumb:hover {
+        background: var(--intel-blue-strong);
+      }
+    }
+
+    /* Touch devices: the native scrollbar can't hover-reveal and its reserved
+       gutter wastes ~28px of width on a phone. Hide it and reclaim the space;
+       the Intel-blue overlay scrollbars remain the on-drag indicator. */
+    @media (pointer: coarse) {
+      .mobile-video-scroll {
+        scrollbar-width: none;
+        scrollbar-gutter: auto;
+      }
+
+      .mobile-video-scroll::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+      }
     }
 
     .mobile-h-scroll {
@@ -217,8 +293,8 @@
       bottom: 12px;
       height: 24px;
       border-radius: 999px;
-      background: rgba(11, 18, 36, 0.86);
-      border: 1px solid rgba(245, 158, 11, 0.38);
+      background: var(--intel-track);
+      border: 1px solid var(--intel-line);
       z-index: 3;
       opacity: 0;
       transform: translateY(6px);
@@ -238,8 +314,8 @@
       bottom: 16px;
       width: 24px;
       border-radius: 999px;
-      background: rgba(11, 18, 36, 0.86);
-      border: 1px solid rgba(245, 158, 11, 0.38);
+      background: var(--intel-track);
+      border: 1px solid var(--intel-line);
       z-index: 3;
       opacity: 0;
       transform: translateX(6px);
@@ -259,7 +335,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      background: rgba(2, 6, 23, 0.9);
+      background: rgba(0, 24, 48, 0.90);
       color: #e5e7eb;
       font-size: 14px;
       font-weight: 600;
@@ -281,7 +357,7 @@
       width: 16px;
       height: 56px;
       border-radius: 999px;
-      background: linear-gradient(180deg, #fcd34d, #f59e0b);
+      background: linear-gradient(180deg, var(--intel-blue-hi), var(--intel-blue));
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
     }
 
@@ -292,7 +368,7 @@
       height: 16px;
       width: 56px;
       border-radius: 999px;
-      background: linear-gradient(180deg, #fcd34d, #f59e0b);
+      background: linear-gradient(180deg, var(--intel-blue-hi), var(--intel-blue));
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
     }
 
@@ -310,11 +386,12 @@
       padding: 0 12px;
       border-radius: 999px;
       border: 1px solid rgba(255, 255, 255, 0.18);
-      background: linear-gradient(180deg, #fcd34d, var(--accent));
+      background: linear-gradient(180deg, var(--intel-blue-hi), var(--intel-blue));
       box-shadow: 0 16px 28px rgba(0, 0, 0, 0.28);
-      color: #1f1400;
+      color: #ffffff;
       touch-action: none;
       user-select: none;
+      -webkit-tap-highlight-color: transparent;
       cursor: grab;
     }
 
@@ -324,10 +401,13 @@
       padding: 7px 10px;
       border-radius: 999px;
       border: 1px solid rgba(255, 255, 255, 0.2);
-      background: linear-gradient(180deg, #fcd34d, var(--accent));
-      color: #1f1400;
+      background: linear-gradient(180deg, var(--intel-blue-hi), var(--intel-blue));
+      color: #ffffff;
       font-weight: 700;
       font-size: 13px;
+      touch-action: manipulation;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
     }
 
     .keyboard-fab.is-dragging {
@@ -402,9 +482,12 @@
         padding: 8px;
       }
 
-      .mobile-terminal-banner {
+      .mobile-status-row {
         margin: 0 0 6px;
-        padding: 6px 8px;
+        min-height: 20px;
+      }
+
+      .mobile-status-notice {
         font-size: 12px;
       }
     }
@@ -423,9 +506,11 @@
     <section class="panel mobile-remote-panel">
       <div class="mobile-header">
         <h1 class="mobile-page-title">Direct User Control over Remote Pages</h1>
+      </div>
+      <div class="mobile-status-row">
+        <span id="statusNotice" class="mobile-status-notice" data-state="idle" aria-live="polite"></span>
         <span id="timeoutCountdown" class="mobile-timeout-countdown" data-state="idle" aria-live="polite" hidden></span>
       </div>
-      <p id="terminalNotice" class="mobile-terminal-banner" data-state="idle" aria-live="polite"></p>
       <div class="mobile-video-shell">
         <div class="mobile-video-scroll">
           <video id="remoteVideo" class="mobile-video" autoplay playsinline muted tabindex="0"></video>

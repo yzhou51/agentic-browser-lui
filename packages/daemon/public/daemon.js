@@ -55,6 +55,7 @@ async function loadRuntimeConfig() {
   // orphaned on the target page after the share is torn down/reconnected.
   let calibrationEpoch = 0;
   const maxCalibrationAttempts = 2;
+  const pageLoadedTime = Date.now();
 
   function setStatus(text) {
     if (statusEl) {
@@ -63,7 +64,14 @@ async function loadRuntimeConfig() {
     console.log(text);
   }
 
-  function appendMessage(message) {
+  function getTimeLeftBeforeTimeout() {
+    const timeoutMs = Number(runtimeConfig?.daemonTimeoutMs) || 120_000;
+    const deadline = pageLoadedTime + timeoutMs;
+    const now = Date.now();
+    return Math.max(0, deadline - now);
+  }
+
+  async function appendMessage(message) {
     if (!messagesEl) {
       return;
     }
@@ -122,7 +130,7 @@ async function loadRuntimeConfig() {
     }
   }
 
-  async function postAgentEvent(payload) {
+  async function postDaemonPageEvent(payload) {
     try {
       await fetch('/api/v1/page/events', {
         method: 'POST',
@@ -133,6 +141,20 @@ async function loadRuntimeConfig() {
       });
     } catch {
       // Keep CLI page operational even if event post fails.
+    }
+  }
+
+  async function postDaemonPageLogs(message) {
+    try {
+      await fetch('/api/v1/page/logs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(message),
+      });
+    } catch {
+      // Keep CLI page operational even if message post fails.
     }
   }
 
@@ -329,17 +351,13 @@ async function loadRuntimeConfig() {
       return;
     }
 
-    const timeoutMs = Number(runtimeConfig?.daemonTimeoutMs) || 0;
-
+    const timeoutMs = getTimeLeftBeforeTimeout();
     await sendPeerMessage(
       clientId,
       {
         type: 'daemon_online',
         reqId: `daemon-online-${Date.now()}`,
         payload: {
-          daemonId,
-          clientId,
-          signalingServer,
           reason,
           timeoutMs,
         },
@@ -513,7 +531,7 @@ async function loadRuntimeConfig() {
     await p2p.publish(publishTargetId, screenStream);
 
     setStatus('Screen stream published.');
-    await postAgentEvent({
+    await postDaemonPageEvent({
       kind: 'status',
       status: 'sharing',
       state: {
@@ -544,7 +562,7 @@ async function loadRuntimeConfig() {
     await ducClient.disconnect();
 
     setStatus('Disconnected.');
-    await postAgentEvent({
+    await postDaemonPageEvent({
       kind: 'status',
       status: 'disconnected',
     });
@@ -552,9 +570,8 @@ async function loadRuntimeConfig() {
 
   // finish/timeout are terminal: fully disconnect (drops the share AND signaling).
   function handleTerminationMessage(type, payload) {
-    const clientId = payload?.clientId || 'unknown';
     const reason = payload?.reason || 'unspecified';
-    appendMessage(`${type} received from client ${clientId} (${reason})`);
+    appendMessage(`${type} received from client (${reason})`);
     void disconnect();
     return { ok: true, message: `${type} received` };
   }
@@ -568,9 +585,8 @@ async function loadRuntimeConfig() {
   // close is cleaned up by the daemon runtime's leave-grace timer, which closes this
   // page when no reconnect arrives within the grace window.
   function handleClientLeave(payload) {
-    const clientId = payload?.clientId || 'unknown';
     const reason = payload?.reason || 'unspecified';
-    appendMessage(`leave received from client ${clientId} (${reason}); keeping signaling alive for possible refresh reconnect`);
+    appendMessage(`leave received from client (${reason}); keeping signaling alive for possible refresh reconnect`);
 
     // Drop the now-dead share publication but keep signaling connected.
     if (screenStream?.mediaStream) {
@@ -691,7 +707,7 @@ async function loadRuntimeConfig() {
         { label: 'resolve_result success' }
       );
 
-      postAgentEvent({
+      postDaemonPageEvent({
         kind: 'peer_command_result',
         reqId: command.reqId,
         type: 'resolve',
@@ -714,7 +730,7 @@ async function loadRuntimeConfig() {
         { label: 'resolve_result failure' }
       );
 
-      postAgentEvent({
+      postDaemonPageEvent({
         kind: 'peer_command_result',
         reqId: command.reqId,
         type: 'resolve',
@@ -742,8 +758,16 @@ async function loadRuntimeConfig() {
     }
 
     const body = await handleCommand(command);
-    if (normalizedType !== 'mouse_move') {
-      postAgentEvent({
+
+    // Lifecycle notifications (`leave` on refresh/close, `finish`/`timeout`) are fire-and-forget:
+    // the client is tearing down its P2P data channel and neither expects nor can receive a
+    // `command_result`. Attempting to reply routes through p2p.send() to a peer whose channel is
+    // already gone; that send fails, hits the retry path, and then hangs forever waiting for a
+    // channel that will never re-open -- permanently wedging inboundMessageQueue so the following
+    // refresh-reconnect `resolve` is never processed. Skip the reply for these (like mouse_move).
+    const noReplyTypes = new Set(['mouse_move', 'leave', 'finish', 'timeout']);
+    if (!noReplyTypes.has(normalizedType)) {
+      postDaemonPageEvent({
         kind: 'peer_command_result',
         reqId: command.reqId,
         type: command.type,
@@ -787,12 +811,29 @@ async function loadRuntimeConfig() {
   // promise guarantees command N+1 only starts once command N has fully settled.
   let inboundMessageQueue = Promise.resolve();
 
+  // Defense-in-depth for the serialization above: the queue is a single tail promise, so a handler
+  // that never settles would block every later message forever (onMessage keeps firing but the
+  // chained handler never starts). Bound each handler so the tail always settles and the queue
+  // self-heals -- a stuck handler degrades to one dropped/late command instead of freezing input.
+  const INBOUND_HANDLER_TIMEOUT_MS = 1500;
+
+  function withHandlerTimeout(promise, timeoutMs = INBOUND_HANDLER_TIMEOUT_MS) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`inbound handler timed out after ${timeoutMs}ms`)),
+        timeoutMs
+      );
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+
   async function handleIncomingPeerMessage(event) {
       const incomingOrigin = String(event?.origin || event?.from || remoteInput?.value || '').trim();
       const incomingMessage = event?.message ?? event?.data;
 
       appendMessage(`from ${incomingOrigin || 'unknown'}: ${estimateBytes(incomingMessage)} bytes`);
-      postAgentEvent({
+      postDaemonPageEvent({
         kind: 'peer_message',
         origin: incomingOrigin,
         message: incomingMessage,
@@ -802,7 +843,7 @@ async function loadRuntimeConfig() {
         const command = decodeIncomingMessage(incomingMessage);
         await processCommandMessage(incomingOrigin, command);
       } catch (error) {
-        postAgentEvent({
+        postDaemonPageEvent({
           kind: 'peer_command_result',
           ok: false,
           error: error.message,
@@ -825,7 +866,7 @@ async function loadRuntimeConfig() {
 
   ducClient.onMessage = (event) => {
     inboundMessageQueue = inboundMessageQueue
-      .then(() => handleIncomingPeerMessage(event))
+      .then(() => withHandlerTimeout(handleIncomingPeerMessage(event)))
       .catch((error) => {
         appendMessage(`[queue] unhandled error processing peer message: ${error?.message || error}`);
       });
@@ -839,7 +880,7 @@ async function loadRuntimeConfig() {
     const allowedRemoteIds = ducClient.getAllowedRemoteIds();
     setStatus(`Connected as ${daemonId}. Waiting for ${clientId} messages.`);
     appendMessage(`connected to signaling: daemon=${daemonId} client=${clientId} host=${signalingServer}`);
-    await postAgentEvent({
+    await postDaemonPageEvent({
       kind: 'status',
       status: 'connected',
       state: {
@@ -984,7 +1025,7 @@ async function loadRuntimeConfig() {
       for (const command of commands) {
         try {
           const result = await executeAgentCommand(command);
-          await postAgentEvent({
+          await postDaemonPageEvent({
             kind: 'command_result',
             commandId: command.id,
             type: command.type,
@@ -993,7 +1034,7 @@ async function loadRuntimeConfig() {
             error: result?.error || '',
           });
         } catch (error) {
-          await postAgentEvent({
+          await postDaemonPageEvent({
             kind: 'command_result',
             commandId: command.id,
             type: command.type,
@@ -1026,7 +1067,7 @@ async function loadRuntimeConfig() {
   });
 
   window.setInterval(() => {
-    postAgentEvent({
+    postDaemonPageEvent({
       kind: 'heartbeat',
       state: {
         daemonId: String(uidInput?.value || '').trim(),

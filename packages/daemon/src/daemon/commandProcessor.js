@@ -59,7 +59,7 @@ export class CommandProcessor {
 
     try {
       switch (type) {
-        case 'launch_chrome':
+        case 'ensure_chrome':
           this.browserCtrl.configureLaunch(payload || {});
           await this.browserCtrl.launchIfNeeded();
           return { ok: true, message: 'Chrome launched.' };

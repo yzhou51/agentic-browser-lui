@@ -3,13 +3,13 @@ import { normalizeId } from './sessionOptions.js';
 // Ordered stages a session moves through, surfaced in status payloads/logs.
 export const SESSION_STAGES = {
   START: 'start',
-  LAUNCH_CHROME: 'launch_chrome',
-  OPEN_DAEMON_PAGE: 'open_daemon_page',
-  OPEN_TARGET_PAGE: 'open_target_page',
-  CONNECT_TO_SIGNAL_SERVER: 'connect_to_signal_server',
-  WAIT_CLIENT_RESOLVE: 'wait_client_resolve',
+  CHROME_READY: 'chrome_ready',
+  DAEMON_PAGE: 'daemon_page',
+  TARGET_PAGE: 'target_page',
+  SIGNALING_READY: 'signal_server_connection',
+  SCREEN_SHARE_READY: 'screen_share_ready',
   USER_INTERACTION: 'user_interaction',
-  FINISH: 'finish',
+  COMPLETION: 'completion',
 };
 
 // Owns the lifecycle of the single active daemon session: its progress/status
@@ -110,7 +110,7 @@ export class SessionManager {
     this.clearPendingLeave('session_completed');
     this.activeSession.outcome = outcome;
     this.activeSession.completedAt = Date.now();
-    this.updateProgress(SESSION_STAGES.FINISH, outcome, statusMessage);
+    this.updateProgress(SESSION_STAGES.COMPLETION, outcome, statusMessage);
     this.notifyCompletionWaiters({
       outcome,
       status: this.activeSession.status,
@@ -125,7 +125,7 @@ export class SessionManager {
     message = '',
     status = '',
     outcome = '',
-    stage = SESSION_STAGES.FINISH,
+    stage = SESSION_STAGES.COMPLETION,
   } = {}) {
     const targetId = String(clientId || this.activeSession.clientId || '').trim();
     if (!targetId) {

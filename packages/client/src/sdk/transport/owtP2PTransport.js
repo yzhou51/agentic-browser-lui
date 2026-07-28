@@ -28,6 +28,25 @@ export function createOwtP2PTransport({
 
   const directTypeSet = new Set(directSignalingTypes.map((type) => asTrimmedString(type).toLowerCase()).filter(Boolean));
 
+  // Upper bound on a single p2p.send(). OWT's send resolves once the data channel accepts the
+  // payload, but a send to a peer whose channel is gone (e.g. right after a client refresh/leave)
+  // can hang indefinitely instead of rejecting. Racing it against a timeout guarantees the send
+  // always settles so callers -- and any queue chained on them -- can never wedge permanently.
+  const P2P_SEND_TIMEOUT_MS = 1000;
+
+  function sendWithTimeout(targetId, payload, timeoutMs = P2P_SEND_TIMEOUT_MS) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`p2p.send timed out after ${timeoutMs}ms`)),
+        timeoutMs
+      );
+    });
+    return Promise.race([Promise.resolve(p2p.send(targetId, payload)), timeout]).finally(() =>
+      clearTimeout(timer)
+    );
+  }
+
   function isDirectSignalingType(type) {
     return directTypeSet.has(asTrimmedString(type).toLowerCase());
   }
@@ -235,7 +254,7 @@ export function createOwtP2PTransport({
     }
 
     try {
-      await p2p.send(targetId, payload);
+      await sendWithTimeout(targetId, payload);
     } catch (error) {
       const errorMessage = String(error?.message || error || 'Unknown send error');
       console.error('[channel-verify] SEND via DATA channel (p2p) -> FAILED', {
@@ -254,7 +273,7 @@ export function createOwtP2PTransport({
         onRetrySend({ label, errorMessage });
       }
       await ensureConnected();
-      await p2p.send(targetId, payload);
+      await sendWithTimeout(targetId, payload);
     }
   }
 

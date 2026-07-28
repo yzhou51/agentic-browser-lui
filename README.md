@@ -125,7 +125,7 @@ Use this when Chrome is already running with CDP enabled.
 
 3. Start daemon via CLI with `--remote-debugging-port`:
    ```bash
-   node packages/daemon/src/cli.js \
+   node packages/daemon/src/index.js \
      --sessionId test \
      --remote-debugging-port 9222 \
      --timeout 300 \
@@ -147,7 +147,7 @@ Use this when you want the daemon to launch Chrome automatically via Puppeteer. 
 
 2. Start daemon via CLI without `--remote-debugging-port`:
    ```bash
-   node packages/daemon/src/cli.js \
+   node packages/daemon/src/index.js \
      --sessionId test \
      --timeout 300 \
      --targetUrl http://localhost:8080/target-demo.html

@@ -96,6 +96,7 @@ export function startStaticServer({
   submitCommand,
   getDaemonPageCommands,
   onDaemonPageEvent,
+  logger,
 }) {
 
   const server = http.createServer((req, res) => {
@@ -147,6 +148,19 @@ export function startStaticServer({
         ok: true,
         ...data,
       });
+      return;
+    }
+
+    if(req.url.startsWith('/api/v1/page/logs') && req.method === 'POST') {
+      withCorsHeaders(res);
+      readJsonBody(req)
+        .then((payload) => {
+          logger.debug('Daemon page msg ', { payload });
+          writeJson(res, 200, { ok: true });
+        })
+        .catch((error) => {
+          writeJson(res, 400, { ok: false, error: error.message || 'Invalid logs payload.' });
+        });
       return;
     }
 
