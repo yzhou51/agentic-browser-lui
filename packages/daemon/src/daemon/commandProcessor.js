@@ -54,12 +54,12 @@ export class CommandProcessor {
     logger.debug('[daemon] command received', {
       type,
       payloadType: payload instanceof ArrayBuffer ? 'binary' : 'json',
-      requestId: command.requestId,
+      reqId: command.reqId,
     });
 
     try {
       switch (type) {
-        case 'launch_chrome':
+        case 'ensure_chrome':
           this.browserCtrl.configureLaunch(payload || {});
           await this.browserCtrl.launchIfNeeded();
           return { ok: true, message: 'Chrome launched.' };
@@ -208,7 +208,7 @@ export class CommandProcessor {
       logger.error('[daemon] command failed', {
         type,
         payload,
-        requestId: command.requestId,
+        reqId: command.reqId,
         error: error.message,
       });
       throw error;

@@ -115,6 +115,80 @@ export function decodeMouseCommand(buffer) {
 }
 
 /**
+ * Compact bare-string wire format for mouse commands.
+ *
+ * The OWT P2P data channel only accepts strings (it rejects binary and wraps
+ * every message in its own {id,data} JSON envelope). To avoid our own JSON
+ * envelope on top of that -- and OWT's escaping of the nested quotes -- we send
+ * mouse commands as a bare string: a single sentinel char followed by base64 of
+ * the 11-byte binary payload. No type/reqId/__isBinary keys: the command
+ * type is already in byte 0, and these commands are fire-and-forget.
+ *
+ * The sentinel is a printable ASCII char that is NOT in the base64 alphabet and
+ * NOT a JSON opener ('{'/'['/'"'), so the daemon can distinguish these frames
+ * from JSON control messages without attempting a parse, and OWT's
+ * JSON.stringify leaves it untouched (unlike a control char, which would expand
+ * to a 6-byte \uXXXX escape).
+ */
+export const MOUSE_COMMAND_STRING_PREFIX = '~';
+
+function bufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += 1) {
+    binary += String.fromCharCode(bytes[index]);
+  }
+  return globalThis.btoa(binary);
+}
+
+function base64ToBuffer(base64) {
+  const binary = globalThis.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes.buffer;
+}
+
+/**
+ * Encode an 11-byte binary mouse command buffer as a compact bare string.
+ * @param {ArrayBuffer} buffer - Output of encodeMouseCommand.
+ * @returns {string} PREFIX + base64(buffer)
+ */
+export function encodeMouseCommandString(buffer) {
+  return MOUSE_COMMAND_STRING_PREFIX + bufferToBase64(buffer);
+}
+
+/**
+ * True if a value is a compact bare-string mouse-command frame.
+ * @param {*} value
+ * @returns {boolean}
+ */
+export function isMouseCommandString(value) {
+  return (
+    typeof value === 'string' &&
+    value.length > MOUSE_COMMAND_STRING_PREFIX.length &&
+    value[0] === MOUSE_COMMAND_STRING_PREFIX
+  );
+}
+
+/**
+ * Decode a compact bare-string mouse command into { commandType, x, y, b, ... }.
+ * @param {string} value - PREFIX + base64 frame.
+ * @returns {Object|null} Decoded command, or null if not a valid binary frame.
+ */
+export function decodeMouseCommandString(value) {
+  if (!isMouseCommandString(value)) {
+    return null;
+  }
+  try {
+    return decodeMouseCommand(base64ToBuffer(value.slice(MOUSE_COMMAND_STRING_PREFIX.length)));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Normalize a mouse command payload - decode binary if needed, pass JSON through.
  * @param {ArrayBuffer|Object} payload - Binary or JSON payload
  * @returns {Object} Normalized payload

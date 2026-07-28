@@ -69,12 +69,13 @@ async function init() {
     daemonConnecting: 'Connecting to daemon',
     daemonConnected: 'Connected to daemon',
     daemonDisconnected: 'Disconnected from daemon',
+    daemonError: 'Daemon error',
     daemonInteraction: 'Daemon interaction',
   };
 
   const el = {
     finishBtn: document.getElementById('finishBtn'),
-    terminalNotice: document.getElementById('terminalNotice'),
+    statusNotice: document.getElementById('statusNotice'),
     remotePanel: document.querySelector('.mobile-remote-panel'),
     remoteVideo: document.getElementById('remoteVideo'),
     calibrationVeil: document.getElementById('calibrationVeil'),
@@ -146,7 +147,8 @@ async function init() {
         ? runtimeConfig.rtcIceServers
         : parseRtcIceServersJson(import.meta.env?.RTC_ICE_SERVERS_JSON)),
   });
-  const hasScaleParam = hasAnySearchParam(searchParams, ['scrollRate', 'viewScale', 'scale']);
+  // Always true for now, to allow the user to override the default scale via query param.
+  const hasScaleParam = hasAnySearchParam(searchParams, ['scrollRate', 'viewScale', 'scale']) || true; 
   const envScale = readSearchPercentParam(searchParams, ['scrollRate', 'viewScale', 'scale'], 100);
   const envFitValue = readSearchParam(searchParams, 'fit', '').toLowerCase();
   const fitToViewport = envFitValue
@@ -178,12 +180,11 @@ async function init() {
     }
 
     leaveSent = true;
-    ducClient.setDaemonId(daemonId);
+    ducClient.setRemoteId(daemonId);
     const leaveMessage = {
       type: 'leave',
-      requestId: `leave-${Date.now()}`,
+      reqId: `leave-${Date.now()}`,
       payload: {
-        clientId: getClientId(),
         reason,
       },
     };
@@ -209,13 +210,12 @@ async function init() {
       throw new Error('not connected to daemon.');
     }
 
-    ducClient.setDaemonId(daemonId);
+    ducClient.setRemoteId(daemonId);
     await ducClient.sendMessage(
       {
         type: 'finish',
-        requestId: `finish-${Date.now()}`,
+        reqId: `finish-${Date.now()}`,
         payload: {
-          clientId: getClientId(),
           reason,
         },
       },
@@ -231,31 +231,70 @@ async function init() {
     return envIceConfig;
   }
 
-  function setStatus(state, message) {
+  function logStatus(state, message) {
     console.log(`[client] status update: state=${state} message=${message}`);
   }
 
-  function setClientState(stateKey, message) {
-    const nextState = clientState[stateKey] || stateKey;
-    setStatus(nextState, message);
+  // Coarse, user-facing stages shown in #statusNotice. Each internal clientState
+  // key maps to a display label + a tone (drives the color in the CSS):
+  //   Connecting        -> reaching the OWT signaling server / waiting for daemon
+  //   Waiting for share -> resolve sent, daemon spinning up the screen share
+  //   Sharing           -> receiving the remote stream, interactive
+  //   Disconnected/Error/Ended -> terminal / failure states
+  const DISPLAY_STAGE = {
+    owtConnecting:      { label: 'Connecting',        tone: 'info'   },
+    owtConnected:       { label: 'Connecting',        tone: 'info'   },
+    daemonConnecting:   { label: 'Waiting for share', tone: 'info'   },
+    daemonConnected:    { label: 'Waiting for share', tone: 'info'   },
+    daemonInteraction:  { label: 'Sharing',           tone: 'active' },
+    daemonError:        { label: 'Error',             tone: 'error'  },
+    owtDisconnected:    { label: 'Disconnected',      tone: 'error'  },
+    daemonDisconnected: { label: 'Ended',             tone: 'warn'   },
+  };
+
+  // Once a terminal/error status is shown the session is over, so we pin it and
+  // ignore later transient updates (e.g. the "Disconnected from OWT" that fires
+  // during teardown right after a clean finish).
+  let statusEnded = false;
+  let currentStatus = null;
+
+  function renderStatusNotice(text, tone) {
+    if (!el.statusNotice) {
+      return;
+    }
+    const value = String(text || '').trim();
+    if (!value) {
+      el.statusNotice.classList.remove('is-visible');
+      el.statusNotice.dataset.state = 'idle';
+      el.statusNotice.textContent = '';
+      return;
+    }
+    el.statusNotice.dataset.state = tone || 'info';
+    el.statusNotice.textContent = value;
+    el.statusNotice.classList.add('is-visible');
   }
 
-  function showTerminalNotice(state, message) {
-    if (!el.terminalNotice) {
+  function setClientState(stateKey, message) {
+    if (currentStatus === 'daemonInteraction'
+      && (stateKey === 'daemonConnected' || stateKey === 'daemonConnecting')) {
+      // Ignore transient "daemonConnected" after we've already reached the interactive state.
       return;
     }
 
-    const text = String(message || '').trim();
-    if (!text) {
-      el.terminalNotice.classList.remove('is-visible');
-      el.terminalNotice.dataset.state = 'idle';
-      el.terminalNotice.textContent = '';
-      return;
+    currentStatus = stateKey;
+    const nextState = clientState[stateKey] || stateKey;
+    logStatus(nextState, message);
+
+    if (statusEnded) {
+      return; // status is pinned to the final terminal/error state
     }
 
-    el.terminalNotice.dataset.state = state;
-    el.terminalNotice.textContent = text;
-    el.terminalNotice.classList.add('is-visible');
+    const stage = DISPLAY_STAGE[stateKey] || { label: nextState, tone: 'info' };
+    const isEnd = stage.tone === 'error' || stage.tone === 'warn';
+    renderStatusNotice(stage.label, stage.tone);
+    if (isEnd) {
+      statusEnded = true;
+    }
   }
 
   // --- Session inactivity countdown ----------------------------------------
@@ -303,7 +342,6 @@ async function init() {
       countdownTimer = null;
     }
 
-    countdownDeadline = 0;
     renderCountdown('ok');
     //if (el.timeoutCountdown) {
     //  el.timeoutCountdown.hidden = true;
@@ -351,9 +389,8 @@ async function init() {
     resolveAttempts += 1;
     const resolveMessage = {
       type: 'resolve',
-      requestId: `resolve-${Date.now()}-${resolveAttempts}`,
+      reqId: `resolve-${resolveAttempts}`,
       payload: {
-        clientId: getClientId(),
       },
     };
 
@@ -1127,8 +1164,8 @@ async function init() {
       return;
     }
 
-    const requestId = await ducClient.sendCommand('text_input', { text });
-    log(`text_input sent (${requestId}): ${JSON.stringify(text)}`);
+    const reqId = await ducClient.sendCommand('text_input', { text });
+    log(`text_input sent (${reqId}): ${JSON.stringify(text)}`);
   }
 
   async function sendKeyPress(key) {
@@ -1137,8 +1174,8 @@ async function init() {
       return;
     }
 
-    const requestId = await ducClient.sendCommand('key_press', { key });
-    log(`key_press sent (${requestId}): ${key}`);
+    const reqId = await ducClient.sendCommand('key_press', { key });
+    log(`key_press sent (${reqId}): ${key}`);
   }
 
   const sendMouseCommand = createViewerMouseCommandSender({
@@ -1169,11 +1206,11 @@ async function init() {
         );
       }
     },
-    onAfterSend: ({ type, requestId, payload, mapped }) => {
+    onAfterSend: ({ type, reqId, payload, mapped }) => {
       if (type === 'mouse_click') {
-        log(`${type} sent (${requestId}): x=${payload.x} y=${payload.y} source=${payload.sourceWidth}x${payload.sourceHeight}`);
+        log(`${type} sent (${reqId}): x=${payload.x} y=${payload.y} source=${payload.sourceWidth}x${payload.sourceHeight}`);
       } else if (type !== 'mouse_move') {
-        log(`${type} sent (${requestId}).`);
+        log(`${type} sent (${reqId}).`);
       }
     },
   });
@@ -1199,7 +1236,6 @@ async function init() {
 
       el.remoteVideo.play().catch(() => {});
       daemonReadyHint = true;
-      setClientState('daemonConnected', `Daemon "${getDaemonId()}" started screen sharing.`);
       setClientState('daemonInteraction', 'Connected and receiving remote stream.');
       log('Remote stream attached.');
       return;
@@ -1342,7 +1378,7 @@ async function init() {
       if (parsed.type === 'daemon_online') {
         const daemonId = String(parsed?.payload?.daemonId || getDaemonId()).trim();
         if (daemonId) {
-          ducClient.setDaemonId(daemonId);
+          ducClient.setRemoteId(daemonId);
         }
         daemonReadyHint = true;
         startSessionCountdown(parsed?.payload?.timeoutMs);
@@ -1391,7 +1427,7 @@ async function init() {
             try {
               await ducClient.sendMessage({
                 type: 'calibrate_result',
-                requestId: parsed.requestId,
+                reqId: parsed.reqId,
                 payload: detection,
               });
             } catch (error) {
@@ -1409,7 +1445,7 @@ async function init() {
         clearResolveRetryTimer();
         setClientState('daemonConnected', 'Resolve acknowledged by daemon. Waiting for result...');
         log(`Resolve acknowledged by daemon. Waiting for result...`);
-        console.log('[client] resolve_ack received', { requestId: parsed.requestId });
+        console.log('[client] resolve_ack received', { reqId: parsed.reqId });
         return;
       }
       if (parsed.type === 'resolve_result') {
@@ -1419,7 +1455,7 @@ async function init() {
           clearResolveRetryTimer();
         }
         resolveInFlight = false;
-        setClientState(ok ? 'daemonConnected' : 'daemonDisconnected', ok ? 'Resolve processed. Daemon is starting screen share.' : `Resolve failed: ${parsed.error || 'unknown error'}`);
+        setClientState(ok ? 'daemonConnected' : 'daemonError', ok ? 'Resolve processed. Daemon is starting screen share.' : `Resolve failed: ${parsed.error || 'unknown error'}`);
         log(`Resolve result: ${ok ? 'ok' : 'failed'} ${parsed.error ? `(${parsed.error})` : ''}`);
         return;
       }
@@ -1429,7 +1465,6 @@ async function init() {
           ? 'Session finished by daemon.'
           : 'Session timed out on daemon.')).trim();
 
-        showTerminalNotice(isFinish ? 'active' : 'error', noticeMessage);
         setClientState('daemonDisconnected', noticeMessage);
         log(`${parsed.type} received: ${noticeMessage}`);
 
@@ -1451,7 +1486,7 @@ async function init() {
       }
       if (parsed.type === 'command_result') {
         log(
-          `Result "${parsed.requestId || 'n/a'}" from "${origin}": ${parsed.ok ? 'ok' : 'failed'} ` +
+          `Result "${parsed.reqId || 'n/a'}" from "${origin}": ${parsed.ok ? 'ok' : 'failed'} ` +
           `${parsed.error ? `(${parsed.error})` : ''}`
         );
         return;
@@ -2094,7 +2129,7 @@ async function init() {
         resolveInFlight = false;
         clearResolveRetryTimer();
       } catch (error) {
-        setClientState('daemonDisconnected', `Finish failed: ${error.message}`);
+        setClientState('daemonError', `Finish failed: ${error.message}`);
         log(`Finish failed: ${error.message}`);
       }
     });
@@ -2127,8 +2162,8 @@ async function init() {
 
     ducClient.connect({
       signalingHost: getSignalingUrl(),
-      clientId: getClientId(),
-      daemonId: getDaemonId(),
+      localId: getClientId(),
+      remoteId: getDaemonId(),
       ...rtcOptions,
     }).then(() => {
       connected = true;

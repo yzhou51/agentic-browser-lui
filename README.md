@@ -1,6 +1,6 @@
 # Direct User Control
 
-Node.js pnpm workspace for an direct user control P2P system with two sub-projects:
+Node.js pnpm workspace for a direct user control P2P system with two sub-projects:
 
 - `packages/daemon`: Daemon endpoint tooling, local CLI, and daemon-side WebRTC page for browser control.
 - `packages/client`: Client SDK and UI that receives daemon video stream and sends operation commands via data channel.
@@ -125,7 +125,7 @@ Use this when Chrome is already running with CDP enabled.
 
 3. Start daemon via CLI with `--remote-debugging-port`:
    ```bash
-   node packages/daemon/src/cli.js \
+   node packages/daemon/src/index.js \
      --sessionId test \
      --remote-debugging-port 9222 \
      --timeout 300 \
@@ -135,9 +135,9 @@ Use this when Chrome is already running with CDP enabled.
 4. Open client URL:
    - Default: `http://127.0.0.1:5174/direct-user-control.html?sessionId=test&scrollRate=100`
 
-### Mode 2: putter (Auto-launch Chrome)
+### Mode 2: puppeteer (Auto-launch Chrome)
 
-Use this when you want the daemon to launch Chrome automatically via Puppeteer. CDP mode will fallback to this mode when failed to attach to the existing Chrome.
+Use this when you want the daemon to launch Chrome automatically via Puppeteer. CDP mode falls back to this mode when it cannot attach to an existing Chrome.
 
 **Setup:**
 1. Start client static server:
@@ -147,7 +147,7 @@ Use this when you want the daemon to launch Chrome automatically via Puppeteer. 
 
 2. Start daemon via CLI without `--remote-debugging-port`:
    ```bash
-   node packages/daemon/src/cli.js \
+   node packages/daemon/src/index.js \
      --sessionId test \
      --timeout 300 \
      --targetUrl http://localhost:8080/target-demo.html
@@ -160,7 +160,7 @@ Use this when you want the daemon to launch Chrome automatically via Puppeteer. 
 
 **Mode Behavior:**
 - **CDP**: Daemon exits but preserves Chrome and target page (useful for manual inspection)
-- **putter**: Daemon closes Chrome and target page on exit (clean shutdown)
+- **puppeteer**: Daemon closes Chrome and target page on exit (clean shutdown)
 
 ## Headless Mode for Full Page Capture
 
@@ -215,7 +215,7 @@ sequenceDiagram
     alt CDP provided and Chrome already running
         Daemon->>Daemon: Attach to existing Chrome (CDP mode)
     else otherwise
-        Daemon->>Daemon: Launch new Chrome via Puppeteer (putter mode)
+        Daemon->>Daemon: Launch new Chrome via Puppeteer (puppeteer mode)
     end
 
     Daemon->>DaemonPage: Open daemon page in Chrome
@@ -238,12 +238,17 @@ sequenceDiagram
         DaemonPage-->>Client: Send command_result over data channel
     end
 
-    alt Client page closes or navigates away
+    alt Client page refreshes, closes, or navigates away
         Client->>DaemonPage: Send Leave (best-effort, 500ms window)
-        DaemonPage->>Signal: Disconnect from signaling
-        Daemon->>Daemon: Leave Grace to avoid client refresh 
-        Daemon->>Daemon: Capture leave snapshot
-        Daemon->>Agent: Session completes with outcome=leave
+        DaemonPage->>DaemonPage: Keep signaling alive; drop stale share; arm refresh reconnect
+        Daemon->>Daemon: Defer termination behind leave grace window (config.leaveGraceMs)
+        alt Client reconnects within grace window (was a refresh)
+            Client->>DaemonPage: Send Resolve; daemon rebuilds share + data channel
+            Daemon->>Daemon: Cancel pending leave termination
+        else Grace window elapses (was a genuine close)
+            Daemon->>Daemon: Capture leave snapshot
+            Daemon->>Agent: Session completes with outcome=leave
+        end
     else User clicks Finish button
         Client->>DaemonPage: Send Finish over signal channel
         DaemonPage->>Signal: Disconnect from signaling
@@ -257,7 +262,7 @@ sequenceDiagram
 
     alt CDP mode
         Daemon->>Daemon: Exit daemon process, preserve Chrome and target page
-    else putter mode
+    else puppeteer mode
         Daemon->>Daemon: Close target page and Chrome, then exit
     end
 ```

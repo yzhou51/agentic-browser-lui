@@ -44,7 +44,7 @@ function normalizePort(value) {
   return Math.floor(parsed);
 }
 
-export function createToolModeRuntime({ browserController, logger, requestedRemoteDebuggingPort }) {
+export function resolveBrowserShutdownStrategy({ browserController, logger, requestedRemoteDebuggingPort }) {
   const requestedPort = normalizePort(requestedRemoteDebuggingPort);
   const attachedToRemote = browserController.getRuntimeMode() === 'CDP';
 

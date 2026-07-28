@@ -78,9 +78,9 @@ export function normalizeToolFlagName(name) {
   return base.replace(/-([a-z])/g, (_, char) => char.toUpperCase());
 }
 
-// Parses `--flag value` / `--flag=value` argv into a tool-mode session-start payload.
-// Returns null when argv is not a tool-mode invocation or lacks the required fields.
-export function parseDaemonToolOptions(argv = []) {
+// Parses `--flag value` / `--flag=value` argv into a session-start payload.
+// Returns null when argv is not a invocation or lacks the required fields.
+export function parseSessionRunOptions(argv = []) {
   if (!Array.isArray(argv) || !argv.length) {
     return null;
   }
@@ -170,7 +170,7 @@ export function parseDaemonToolOptions(argv = []) {
   return payload;
 }
 
-// Emits a tool-mode result as JSON to stdout (or stderr on error).
+// Emits a session-start result as JSON to stdout (or stderr on error).
 export function emitToolResult(data, { compact = false, isError = false } = {}) {
   const text = compact
     ? JSON.stringify(data)

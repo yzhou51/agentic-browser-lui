@@ -20,6 +20,10 @@ export {
 export {
   encodeMouseCommand,
   decodeMouseCommand,
+  encodeMouseCommandString,
+  decodeMouseCommandString,
+  isMouseCommandString,
+  MOUSE_COMMAND_STRING_PREFIX,
 } from './input/mouseCommandCodec.js';
 
 // Config: runtime config + ICE log summary.

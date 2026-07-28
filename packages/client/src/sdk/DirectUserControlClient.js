@@ -1,11 +1,12 @@
 import { normalizeRtcIceOptions } from './config/rtcConfig.js';
 import { createOwtP2PTransport } from './transport/owtP2PTransport.js';
 import { SIGNALING_MESSAGE_TYPES, resolveMessageType } from './transport/signalingMessages.js';
+import { encodeMouseCommandString } from './input/mouseCommandCodec.js';
 
 export class DirectUserControlClient {
   // Session identity + caller-supplied event callbacks (the public event API).
-  clientId = null;
-  daemonId = null;
+  localId = null;
+  remoteId = null;
   onRemoteStream = null;
   onMessage = null;
   onPeerConnected = null;
@@ -33,8 +34,8 @@ export class DirectUserControlClient {
       windowObject: window,
       directSignalingTypes: SIGNALING_MESSAGE_TYPES,
       getDesiredSession: () => ({
-        localId: String(this.clientId || '').trim(),
-        remoteId: String(this.daemonId || '').trim(),
+        localId: String(this.localId || '').trim(),
+        remoteId: String(this.remoteId || '').trim(),
         signalingServer: String(this.#connectOptions?.signalingHost || '').trim(),
         rtcConfiguration: this.#rtcConfiguration,
         sessionKey: JSON.stringify(this.#rtcConfiguration?.iceServers || []),
@@ -59,7 +60,7 @@ export class DirectUserControlClient {
       onReconnectNeeded: ({ connectedSession, desired, allowedRemoteIds }) => {
         if (this.onReconnectAttempt) {
           this.onReconnectAttempt({
-            daemonId: desired?.remoteId || this.daemonId,
+            remoteId: desired?.remoteId || this.remoteId,
             connectedSession,
             desired,
             allowedRemoteIds,
@@ -89,7 +90,7 @@ export class DirectUserControlClient {
     let remoteStream = originalStream;
 
     console.debug('[client-sdk] streamadded received', {
-      daemonId: this.daemonId,
+      remoteId: this.remoteId,
       hasStream: Boolean(originalStream),
       streamId: originalStream?.id || originalStream?.mediaStream?.id || null,
       hasMediaStream: Boolean(originalStream?.mediaStream),
@@ -132,7 +133,7 @@ export class DirectUserControlClient {
     this.#peerConnected = true;
     if (this.onPeerConnected) {
       this.onPeerConnected({
-        daemonId: this.daemonId,
+        remoteId: this.remoteId,
         ...details,
       });
     }
@@ -145,25 +146,25 @@ export class DirectUserControlClient {
     this.#peerConnected = false;
     if (this.onPeerDisconnected) {
       this.onPeerDisconnected({
-        daemonId: this.daemonId,
+        remoteId: this.remoteId,
         ...details,
       });
     }
   }
 
-  async connect({ signalingHost, clientId, daemonId, forceReconnect = false, ...rtcInput }) {
+  async connect({ signalingHost, localId, remoteId, forceReconnect = false, ...rtcInput }) {
     const rtcOptions = normalizeRtcIceOptions(rtcInput);
     const nextOptions = {
       signalingHost: String(signalingHost || '').trim(),
-      clientId: String(clientId || '').trim(),
-      daemonId: String(daemonId || '').trim(),
+      localId: String(localId || '').trim(),
+      remoteId: String(remoteId || '').trim(),
       forceReconnect: Boolean(forceReconnect),
       ...rtcOptions,
     };
 
     this.#connectOptions = nextOptions;
-    this.clientId = nextOptions.clientId;
-    this.daemonId = nextOptions.daemonId;
+    this.localId = nextOptions.localId;
+    this.remoteId = nextOptions.remoteId;
     this.#rtcConfiguration = nextOptions.rtcConfiguration || {};
 
     if (this.#connectPromise) {
@@ -176,9 +177,9 @@ export class DirectUserControlClient {
 
     this.#connectPromise = (async () => {
       const p2p = await this.transport.connect();
-      p2p.allowedRemoteIds = this.daemonId ? [this.daemonId] : [];
+      p2p.allowedRemoteIds = this.remoteId ? [this.remoteId] : [];
 
-      return this.clientId;
+      return this.localId;
     })();
 
     try {
@@ -188,9 +189,9 @@ export class DirectUserControlClient {
     }
   }
 
-  setDaemonId(daemonId) {
-    const nextDaemonId = String(daemonId || '').trim();
-    this.daemonId = nextDaemonId;
+  setDaemonId(remoteId) {
+    const nextDaemonId = String(remoteId || '').trim();
+    this.remoteId = nextDaemonId;
     this.transport.setAllowedRemoteIds(nextDaemonId ? [nextDaemonId] : []);
   }
 
@@ -202,7 +203,7 @@ export class DirectUserControlClient {
 
   async ensureConnected() {
     if (this.transport.isConnected()) {
-      return this.clientId;
+      return this.localId;
     }
 
     if (this.#connectPromise) {
@@ -228,14 +229,18 @@ export class DirectUserControlClient {
   }
 
   async sendCommand(type, payload = {}) {
-    const requestId = `cmd-${Date.now()}-${++this.#requestSeq}`;
-    const command = { type, payload, requestId };
+    const reqId = `cmd-${++this.#requestSeq}`;
+    const command = { type, payload, reqId };
     await this.sendMessage(command);
-    return requestId;
+    return reqId;
   }
 
   // Wrap an outgoing message for transport. ArrayBuffer payloads (binary mouse
-  // commands) are base64-encoded and flagged so the daemon can decode them.
+  // commands) are sent as a compact bare string -- PREFIX + base64 -- instead of
+  // a JSON envelope: the command type is already encoded in byte 0 and these
+  // commands are fire-and-forget, so type/payload/reqId keys are pure
+  // overhead. This drops our ~70-byte wrapper and avoids OWT double-escaping the
+  // nested JSON quotes when it wraps the message in its own {id,data} envelope.
   #serializeOutgoingMessage(message) {
     const isBinaryPayload =
       typeof message === 'object' &&
@@ -247,17 +252,11 @@ export class DirectUserControlClient {
       return message;
     }
 
-    const binaryData = new Uint8Array(message.payload);
-    const base64Data = btoa(String.fromCharCode(...binaryData));
-    return {
-      ...message,
-      payload: base64Data,
-      __isBinary: true,
-    };
+    return encodeMouseCommandString(message.payload);
   }
 
   async sendMessage(message, targetId) {
-    const resolvedTarget = String(targetId || this.daemonId || '').trim();
+    const resolvedTarget = String(targetId || this.remoteId || '').trim();
     if (!resolvedTarget) {
       throw new Error('Target daemon id is required before sending messages.');
     }
@@ -282,8 +281,30 @@ export class DirectUserControlClient {
     return this.transport.sendMessage(targetPeerId, message, { label, retry });
   }
 
-  getClient() {
-    return this.transport.getClient();
+  async publishStream(targetId, stream) {
+    const p2p = this.transport.getClient();
+    const publishTargetId = String(targetId || this.remoteId || '').trim();
+    if (!publishTargetId) {
+      throw new Error('Target daemon id is required before publishing stream.');
+    }
+    await p2p.publish(publishTargetId, stream);
+  }
+
+  stop(targetId) {
+    const p2p = this.transport.getClient();
+    if (p2p && typeof p2p.stop === 'function' && targetId) {
+      try {
+        p2p.stop(targetId);
+        return `reset stale P2P connection to ${targetId}.`;
+      } catch (error) {
+        return `failed to reset P2P connection: ${error?.message || error}`;
+      }
+    }
+    return `no P2P connection to reset for ${targetId}.`;
+  }
+
+  hasClient() {
+    return !!this.transport.getClient();
   }
 
   getAllowedRemoteIds() {
@@ -300,8 +321,8 @@ export class DirectUserControlClient {
       return null;
     }
     return {
-      daemonId: session.localId,
-      clientId: session.remoteId,
+      remoteId: session.localId,
+      localId: session.remoteId,
       signalingServer: session.signalingServer,
       sessionKey: session.sessionKey,
     };

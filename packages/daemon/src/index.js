@@ -2,11 +2,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { config } from './config.js';
-import { buildCli } from './cli.js';
 import { BrowserController } from './daemon/browserController.js';
 import { DaemonPageBridge } from './daemon/daemonPageBridge.js';
 import { CommandProcessor } from './daemon/commandProcessor.js';
-import { createToolModeRuntime, PuppeteerMode, RemoteDevtoolsMode } from './daemon/toolMode.js';
+import { resolveBrowserShutdownStrategy, PuppeteerMode, RemoteDevtoolsMode } from './daemon/browserShutdownStrategy.js';
 import { SessionManager, SESSION_STAGES } from './daemon/sessionManager.js';
 import {
   normalizeIceUrlList,
@@ -14,7 +13,7 @@ import {
   parseTimeoutSeconds,
   createSessionId,
   normalizeId,
-  parseDaemonToolOptions,
+  parseSessionRunOptions,
   emitToolResult,
 } from './daemon/sessionOptions.js';
 import { createLogger } from './logger.js';
@@ -79,48 +78,48 @@ async function waitForDaemonPageOnline(timeoutMs = 12000) {
   return false;
 }
 
-async function startSessionWorkflow(payload = {}) {
-  const requestedSessionId = String(payload.sessionId || '').trim();
-  let daemonId = String(payload.daemonId || '').trim();
-  let clientId = String(payload.clientId || '').trim();
+async function startSessionWorkflow(sessionRunOptions = {}) {
+  const requestedSessionId = String(sessionRunOptions.sessionId || '').trim();
+  let daemonId = String(sessionRunOptions.daemonId || '').trim();
+  let clientId = String(sessionRunOptions.clientId || '').trim();
   if ((!daemonId || !clientId) && requestedSessionId) {
     const derived = createPeerIds(requestedSessionId);
     daemonId = daemonId || derived.daemonId;
     clientId = clientId || derived.clientId;
   }
 
-  const targetUrl = String(payload.targetUrl || '').trim();
+  const targetUrl = String(sessionRunOptions.targetUrl || '').trim();
   if (!daemonId || !clientId || !targetUrl) {
     throw new Error('daemonId, clientId, and targetUrl are required.');
   }
 
   const sessionId = requestedSessionId || createSessionId();
-  const timeoutSeconds = parseTimeoutSeconds(payload.timeout, Math.max(1, Math.floor((config.daemonTimeoutMs || 120000) / 1000)));
+  const timeoutSeconds = parseTimeoutSeconds(sessionRunOptions.timeout, Math.max(1, Math.floor((config.daemonTimeoutMs || 120000) / 1000)));
   const timeoutMs = timeoutSeconds * 1000;
   // daemon.html is the sole daemon-side control page.
   const daemonPageName = 'daemon.html';
-  const signalingServer = String(payload.signalingServer || session.signalingServer || config.signalingServer || '').trim();
-  const stunUrls = normalizeIceUrlList(payload.stunUrls).length
-    ? normalizeIceUrlList(payload.stunUrls)
+  const signalingServer = String(sessionRunOptions.signalingServer || session.signalingServer || config.signalingServer || '').trim();
+  const stunUrls = normalizeIceUrlList(sessionRunOptions.stunUrls).length
+    ? normalizeIceUrlList(sessionRunOptions.stunUrls)
     : normalizeIceUrlList(session.stunUrls || config.stunUrls);
-  const turnUrls = normalizeIceUrlList(payload.turnUrls).length
-    ? normalizeIceUrlList(payload.turnUrls)
+  const turnUrls = normalizeIceUrlList(sessionRunOptions.turnUrls).length
+    ? normalizeIceUrlList(sessionRunOptions.turnUrls)
     : normalizeIceUrlList(session.turnUrls || config.turnUrls);
-  const turnUsername = String(payload.turnUsername ?? session.turnUsername ?? config.turnUsername ?? '').trim();
-  const turnCredential = String(payload.turnCredential ?? session.turnCredential ?? config.turnCredential ?? '').trim();
-  const hasRemoteDebuggingPort = Object.prototype.hasOwnProperty.call(payload, 'remoteDebuggingPort');
+  const turnUsername = String(sessionRunOptions.turnUsername ?? session.turnUsername ?? config.turnUsername ?? '').trim();
+  const turnCredential = String(sessionRunOptions.turnCredential ?? session.turnCredential ?? config.turnCredential ?? '').trim();
+  const hasRemoteDebuggingPort = Object.prototype.hasOwnProperty.call(sessionRunOptions, 'remoteDebuggingPort');
   const chromeExecutablePath = String(
-    payload.chrome ?? process.env.DAEMON_SESSION_START_CHROME ?? process.env.PUPPETEER_EXECUTABLE_PATH ?? ''
+    sessionRunOptions.chrome ?? process.env.DAEMON_SESSION_START_CHROME ?? process.env.PUPPETEER_EXECUTABLE_PATH ?? ''
   ).trim();
   let remoteDebuggingPort = null;
   if (hasRemoteDebuggingPort) {
-    const parsedRemotePort = Number(payload.remoteDebuggingPort);
+    const parsedRemotePort = Number(sessionRunOptions.remoteDebuggingPort);
     if (!Number.isFinite(parsedRemotePort) || parsedRemotePort <= 0) {
       throw new Error('remote-debugging-port must be a positive number.');
     }
     remoteDebuggingPort = Math.floor(parsedRemotePort);
   }
-  const chromeParamsRaw = payload.chromeParams ?? process.env.DAEMON_SESSION_START_CHROME_PARAMS_JSON ?? '[]';
+  const chromeParamsRaw = sessionRunOptions.chromeParams ?? process.env.DAEMON_SESSION_START_CHROME_PARAMS_JSON ?? '[]';
   const chromeParams = parseChromeParamsValue(chromeParamsRaw);
 
   sessionManager.beginSession({
@@ -133,9 +132,9 @@ async function startSessionWorkflow(payload = {}) {
 
   sessionManager.updateProgress(SESSION_STAGES.START, 'running', 'starting session flow');
 
-  sessionManager.updateProgress(SESSION_STAGES.LAUNCH_CHROME, 'running', 'launching chrome');
+  sessionManager.updateProgress(SESSION_STAGES.CHROME_READY, 'running', 'launching chrome');
   const launchResult = await commands.handle({
-    type: 'launch_chrome',
+    type: 'ensure_chrome',
     payload: {
       chrome: chromeExecutablePath,
       remoteDebuggingPort: hasRemoteDebuggingPort ? remoteDebuggingPort : null,
@@ -172,12 +171,12 @@ async function startSessionWorkflow(payload = {}) {
     daemonUrl.searchParams.set('turnCredential', turnCredential);
   }
 
-  sessionManager.updateProgress(SESSION_STAGES.OPEN_DAEMON_PAGE, 'running', 'opening daemon page');
+  sessionManager.updateProgress(SESSION_STAGES.DAEMON_PAGE, 'running', 'opening daemon page');
   await commands.handle({
     type: 'open_url',
     payload: { url: daemonUrl.toString() },
   });
-  sessionManager.updateProgress(SESSION_STAGES.OPEN_TARGET_PAGE, 'running', 'opening target page');
+  sessionManager.updateProgress(SESSION_STAGES.TARGET_PAGE, 'running', 'opening target page');
   const openTargetResult = await commands.handle({
     type: 'open_target_page',
     payload: {
@@ -188,12 +187,12 @@ async function startSessionWorkflow(payload = {}) {
 
   const online = await waitForDaemonPageOnline(12000);
   if (!online) {
-    sessionManager.updateProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'error', 'daemon bridge did not come online in time');
+    sessionManager.updateProgress(SESSION_STAGES.SIGNALING_READY, 'error', 'daemon bridge did not come online in time');
     throw new Error('daemon bridge did not come online in time.');
   }
 
-  sessionManager.updateProgress(SESSION_STAGES.CONNECT_TO_SIGNAL_SERVER, 'running', 'connecting to signaling server');
-  const requestId = `${sessionId}-connect`;
+  sessionManager.updateProgress(SESSION_STAGES.SIGNALING_READY, 'running', 'connecting to signaling server');
+  const reqId = `${sessionId}-connect`;
   const connectCommand = daemonPageBridge.enqueue('connect_only', {
     daemonId,
     clientId,
@@ -202,12 +201,12 @@ async function startSessionWorkflow(payload = {}) {
     turnUrls,
     turnUsername,
     turnCredential,
-    requestId,
+    reqId,
   });
 
   sessionManager.armClientMessageTimeout('session_start', timeoutMs);
 
-  sessionManager.updateProgress(SESSION_STAGES.WAIT_CLIENT_RESOLVE, 'running', 'waiting for client resolve');
+  sessionManager.updateProgress(SESSION_STAGES.SCREEN_SHARE_READY, 'running', 'waiting for client resolve');
   let waitResult = null;
   try {
     waitResult = await sessionManager.waitForSessionReady(timeoutMs + 500);
@@ -255,477 +254,448 @@ async function startSessionWorkflow(payload = {}) {
   };
 }
 
-const cli = buildCli({
-  getState: () => ({
-    daemonId: session.daemonId,
-    clientId: session.clientId,
-    signalingServer: session.signalingServer,
-    staticServerHost: session.staticServerHost,
-    staticServerPort: session.staticServerPort,
-    browserLaunched: Boolean(browserCtrl.browser),
-    pageOpen: Boolean(browserCtrl.page),
-  }),
-  submitCommand: (command) => commands.handle(command),
-});
-
-const toolModePayload = parseDaemonToolOptions(process.argv.slice(2));
-
-if (process.argv.length > 2 && !toolModePayload) {
-  cli.parse(process.argv);
-} else {
-  const publicDir = path.resolve(__dirname, '../public');
-  const browserModuleDir = path.resolve(__dirname, './daemon');
-  const clientSdkDir = path.resolve(__dirname, '../../client/src/sdk');
-  const openHost =
-    config.staticServerHost === '0.0.0.0' || config.staticServerHost === '::'
-      ? 'localhost'
-      : config.staticServerHost;
-  const daemonUrl = `http://${openHost}:${config.staticServerPort}/daemon.html?uid=${encodeURIComponent(session.daemonId)}&remote=${encodeURIComponent(session.clientId)}&host=${encodeURIComponent(session.signalingServer)}`;
-
-  const server = await startStaticServer({
-    rootDir: publicDir,
-    browserModuleDir,
-    clientSdkDir,
-    host: config.staticServerHost,
-    port: config.staticServerPort,
-    getDaemonConfig: () => ({
-      ...session,
-      headless: config.browserHeadless,
-      runtimeMode: browserCtrl.getRuntimeMode(),
-      browserConnectionMode: browserCtrl.browserConnectionMode,
-      // Prefer the active session's timeout: it is assigned early in
-      // startSessionWorkflow (before the daemon page is opened and fetches
-      // this config), whereas currentDaemonTimeoutMs is only armed later.
-      // Reading currentDaemonTimeoutMs here would return the default
-      // (e.g. 120s) instead of the session's --timeout value (e.g. 300s).
-      daemonTimeoutMs: activeSession.timeoutMs || sessionManager.currentDaemonTimeoutMs,
-    }),
-    submitCommand: (command) => commands.handle(command),
-    getDaemonPageCommands: (after) => daemonPageBridge.getCommandsAfter(after),
-    onDaemonPageEvent: async (event) => {
-      const kind = String(event?.kind || '').trim();
-      if (kind === 'heartbeat') {
-        daemonPageBridge.mergeState(event.state || {});
-        return;
-      }
-      if (kind === 'status') {
-        if (event.status === 'connected') {
-          logger.info('daemon signaling connected', {
-            daemonId: String(event?.state?.daemonId || ''),
-            clientId: String(event?.state?.clientId || ''),
-            signalingServer: String(event?.state?.signalingServer || ''),
-            allowedRemoteIds: Array.isArray(event?.state?.allowedRemoteIds) ? event.state.allowedRemoteIds : [],
-          });
-        }
-        if (event.status === 'sharing') {
-          logger.info('daemon share diagnostics', {
-            automated: Boolean(event?.state?.automated),
-            manualPromptShown: Boolean(event?.state?.manualPromptShown),
-            controlTargetMode: String(event?.state?.controlTargetMode || ''),
-            targetUrl: String(event?.state?.targetUrl || ''),
-            targetDescriptor: String(event?.state?.targetDescriptor || ''),
-            sharedTrackLabel: String(event?.state?.sharedTrackLabel || ''),
-            capturedResolution: event?.state?.capturedResolution || null,
-          });
-        }
-        if (event.status === 'connected') {
-          const connectedClientId = normalizeId(event?.state?.clientId);
-          const expectedClientId = normalizeId(activeSession.clientId);
-          if (connectedClientId && expectedClientId && connectedClientId === expectedClientId) {
-            activeSession.connected = true;
-            activeSession.connectedAt = Date.now();
-            sessionManager.notifyReadyWaiters();
-          }
-        }
-        daemonPageBridge.markSeen(event.status || null);
-        return;
-      }
-      if (kind === 'command_result') {
-        daemonPageBridge.recordCommandResult(event);
-        return;
-      }
-      if (kind === 'peer_message') {
-        const rawMessage = String(event?.message || '');
-        const messageBytes = (() => {
-          try {
-            return new TextEncoder().encode(rawMessage).length;
-          } catch {
-            return rawMessage.length;
-          }
-        })();
-        let parsedType = '';
-        let parsedRequestId = '';
-        let parsedPayload = null;
-        try {
-          const parsed = JSON.parse(rawMessage);
-          parsedPayload = parsed;
-          parsedType = String(parsed?.type || '').trim().toLowerCase();
-          parsedRequestId = String(parsed?.requestId || '');
-        } catch {
-          // Keep raw message logging even for non-JSON payloads.
-        }
-
-        logger.debug('daemon peer message received', {
-          origin: String(event?.origin || ''),
-          type: parsedType,
-          requestId: parsedRequestId,
-          bytes: messageBytes,
-        });
-
-        const payloadClientId = String(
-          parsedPayload?.payload?.clientId || parsedPayload?.clientId || ''
-        ).trim();
-
-        const messageOrigin = String(event?.origin || '').trim();
-        const expectedClientId = String(session.clientId || '').trim();
-        const originMatchesSessionClient = normalizeId(messageOrigin) && normalizeId(expectedClientId) && normalizeId(messageOrigin) === normalizeId(expectedClientId);
-        const payloadMatchesSessionClient = normalizeId(payloadClientId) && normalizeId(expectedClientId) && normalizeId(payloadClientId) === normalizeId(expectedClientId);
-
-        if (originMatchesSessionClient || payloadMatchesSessionClient) {
-          if (!activeSession.connected) {
-            activeSession.connected = true;
-            activeSession.connectedAt = Date.now();
-          }
-          sessionManager.armClientMessageTimeout('peer_message', sessionManager.currentDaemonTimeoutMs);
-          logger.debug('Client message timeout reset from peer message.', {
-            origin: messageOrigin,
-            timeoutMs: sessionManager.currentDaemonTimeoutMs,
-          });
-        }
-
-        if (parsedType === 'resolve') {
-          const expectedActiveClientId = normalizeId(activeSession.clientId);
-          const originMatchesActiveClient = normalizeId(messageOrigin) && expectedActiveClientId && normalizeId(messageOrigin) === expectedActiveClientId;
-          const payloadMatchesActiveClient = normalizeId(payloadClientId) && expectedActiveClientId && normalizeId(payloadClientId) === expectedActiveClientId;
-          if (originMatchesActiveClient || payloadMatchesActiveClient) {
-            // A resolve from the active client during a leave grace window means
-            // the client reconnected -- i.e. the previous `leave` was a page
-            // refresh, not a close. Cancel the deferred termination.
-            sessionManager.clearPendingLeave('reconnect_resolve');
-            if (!activeSession.connected) {
-              activeSession.connected = true;
-              activeSession.connectedAt = Date.now();
-            }
-            activeSession.resolved = true;
-            activeSession.lastResolveAt = Date.now();
-            activeSession.lastResolveFrom = messageOrigin || payloadClientId;
-            sessionManager.notifyReadyWaiters();
-            sessionManager.updateProgress(SESSION_STAGES.USER_INTERACTION, 'running', 'resolve received, user interaction phase');
-          }
-          logger.info('RESOLVE_RECEIVED', {
-            origin: String(event?.origin || ''),
-            payloadClientId,
-            requestId: parsedRequestId,
-            bytes: messageBytes,
-          });
-        } else if (parsedType === 'finish') {
-          const expectedActiveClientId = normalizeId(activeSession.clientId);
-          const earlyFinishForActiveSession = Boolean(activeSession.id && !activeSession.completedAt);
-          const acceptedFinish = await sessionManager.handleTerminationMessage({
-            expectedActiveClientId,
-            messageOrigin,
-            payloadClientId,
-            outcome: 'success',
-            statusMessage: 'Finish message received. Session completed successfully.',
-            snapshotPrefix: `finish-${activeSession.clientId || 'client'}`,
-            sendNotice: true,
-            updateSessionState: () => {
-              activeSession.lastFinishAt = Date.now();
-              activeSession.lastFinishFrom = messageOrigin || payloadClientId;
-            },
-          });
-
-          logger.info('FINISH_RECEIVED', {
-            origin: String(event?.origin || ''),
-            payloadClientId,
-            acceptedFinish,
-            earlyFinishForActiveSession,
-            requestId: parsedRequestId,
-            bytes: messageBytes,
-          });
-        } else if (parsedType === 'leave') {
-          const expectedActiveClientId = normalizeId(activeSession.clientId);
-          // Defer termination behind a grace window instead of ending the session
-          // immediately: a refresh emits the same `leave` as a close. If the client
-          // reconnects (resolve) within config.leaveGraceMs, the resolve handler
-          // cancels this; otherwise the timer fires and terminates as a real close.
-          const scheduledLeave = sessionManager.scheduleLeaveTermination({
-            expectedActiveClientId,
-            messageOrigin,
-            payloadClientId,
-            outcome: 'leave',
-            statusMessage: 'Leave message received from client. Session ended by client disconnect.',
-            snapshotPrefix: `leave-${activeSession.clientId || 'client'}`,
-            sendNotice: false,
-            updateSessionState: null,
-          });
-
-          logger.info('LEAVE_RECEIVED', {
-            origin: String(event?.origin || ''),
-            payloadClientId,
-            scheduledLeave,
-            graceMs: config.leaveGraceMs,
-            requestId: parsedRequestId,
-            bytes: messageBytes,
-          });
-        } else if (parsedType === 'timeout') {
-          const expectedActiveClientId = normalizeId(activeSession.clientId);
-          const acceptedTimeout = await sessionManager.handleTerminationMessage({
-            expectedActiveClientId,
-            messageOrigin,
-            payloadClientId,
-            outcome: 'timeout',
-            statusMessage: 'Timeout message received from client. Session ended by timeout event.',
-            snapshotPrefix: `timeout-${activeSession.clientId || 'client'}`,
-            sendNotice: true,
-            updateSessionState: null,
-          });
-
-          logger.info('TIMEOUT_RECEIVED', {
-            origin: String(event?.origin || ''),
-            payloadClientId,
-            acceptedTimeout,
-            requestId: parsedRequestId,
-            bytes: messageBytes,
-          });
-        } else if (parsedType === 'connect_only') {
-          logger.info('TAKE_ACTION_CONNECT_ONLY_RECEIVED', {
-            origin: String(event?.origin || ''),
-            requestId: parsedRequestId,
-            bytes: messageBytes,
-          });
-        }
-
-        daemonPageBridge.recordPeerMessage(event);
-        return;
-      }
-      if (kind === 'peer_command_result') {
-        const resultType = String(event?.type || '').trim().toLowerCase();
-        logger.debug('daemon peer command result', {
-          requestId: String(event?.requestId || ''),
-          type: resultType,
-          ok: event?.ok !== false,
-          message: String(event?.message || ''),
-          error: String(event?.error || ''),
-          bridge: String(event?.bridge || ''),
-        });
-
-        if (resultType === 'resolve') {
-          if (event?.ok !== false) {
-            logger.info('RESOLVE_SHARE_STARTED', {
-              requestId: String(event?.requestId || ''),
-              message: String(event?.message || ''),
-            });
-          } else {
-            logger.error('RESOLVE_SHARE_FAILED', {
-              requestId: String(event?.requestId || ''),
-              error: String(event?.error || ''),
-            });
-          }
-        } else if (resultType === 'connect_only') {
-          if (event?.ok !== false) {
-            logger.info('TAKE_ACTION_SIGNALING_CONNECTED', {
-              requestId: String(event?.requestId || ''),
-              message: String(event?.message || ''),
-            });
-          } else {
-            logger.error('TAKE_ACTION_SIGNALING_CONNECT_FAILED', {
-              requestId: String(event?.requestId || ''),
-              error: String(event?.error || ''),
-            });
-          }
-        }
-
-        daemonPageBridge.recordPeerCommandResult(event);
-        return;
-      }
-      daemonPageBridge.markSeen();
-    },
-  });
-
-  let shuttingDown = false;
-
-  if (!toolModePayload) {
-    sessionManager.armClientMessageTimeout('runtime_start');
+async function processDaemonPageEvent(event) {
+  const kind = String(event?.kind || '').trim();
+  if (kind === 'heartbeat') {
+    daemonPageBridge.mergeState(event.state || {});
+    return;
   }
+  if (kind === 'status') {
+    if (event.status === 'connected') {
+      logger.info('daemon signaling connected', {
+        daemonId: String(event?.state?.daemonId || ''),
+        clientId: String(event?.state?.clientId || ''),
+        signalingServer: String(event?.state?.signalingServer || ''),
+        allowedRemoteIds: Array.isArray(event?.state?.allowedRemoteIds) ? event.state.allowedRemoteIds : [],
+      });
 
-  const shutdown = async (exitCode = null, options = {}) => {
-    if (shuttingDown) {
-      return;
+      const connectedClientId = normalizeId(event?.state?.clientId);
+      const expectedClientId = normalizeId(activeSession.clientId);
+      if (connectedClientId && expectedClientId && connectedClientId === expectedClientId) {
+        activeSession.connected = true;
+        activeSession.connectedAt = Date.now();
+        sessionManager.notifyReadyWaiters();
+      }
     }
-    const toolModeRuntime = options.toolModeRuntime || null;
-    const preserveBrowser = Object.prototype.hasOwnProperty.call(options, 'preserveBrowser')
-      ? Boolean(options.preserveBrowser)
-      : browserCtrl.shouldPreserveBrowserOnExit();
-    const code = Number.isInteger(exitCode) ? exitCode : (Number.isInteger(process.exitCode) ? process.exitCode : 0);
-    shuttingDown = true;
-
-    // Absolute failsafe: whatever throws or blocks below, guarantee the process
-    // terminates. unref() so this timer never itself keeps the event loop alive.
-    // Without this, a stalled browserCtrl.disconnect()/server.close() (or a throw
-    // before process.exit) leaves the HTTP server, Chrome CDP socket and timers
-    // holding the loop open -- the daemon hangs and never exits.
-    const forceExitTimer = setTimeout(() => {
-      logger.warn(`Shutdown failsafe elapsed; forcing immediate exit (code ${code}).`);
-      process.exit(code);
-    }, 5000);
-    if (typeof forceExitTimer.unref === 'function') {
-      forceExitTimer.unref();
+    if (event.status === 'sharing') {
+      logger.info('daemon share diagnostics', {
+        automated: Boolean(event?.state?.automated),
+        manualPromptShown: Boolean(event?.state?.manualPromptShown),
+        controlTargetMode: String(event?.state?.controlTargetMode || ''),
+        targetUrl: String(event?.state?.targetUrl || ''),
+        targetDescriptor: String(event?.state?.targetDescriptor || ''),
+        sharedTrackLabel: String(event?.state?.sharedTrackLabel || ''),
+        capturedResolution: event?.state?.capturedResolution || null,
+      });
     }
-
-    try {
-      sessionManager.clearClientMessageTimeout();
-      sessionManager.clearPendingLeave('shutdown');
-
-      // Browser teardown is best-effort: a failure here must not prevent exit.
+    daemonPageBridge.markSeen(event.status || null);
+    return;
+  }
+  if (kind === 'command_result') {
+    daemonPageBridge.recordCommandResult(event);
+    return;
+  }
+  if (kind === 'peer_message') {
+    const rawMessage = String(event?.message || '');
+    const messageBytes = (() => {
       try {
-        if (toolModeRuntime) {
-          await toolModeRuntime.shutdownBrowser();
-        } else if (preserveBrowser) {
-          await new RemoteDevtoolsMode({
-            browserController: browserCtrl,
-            logger,
-            requestedRemoteDebuggingPort: browserCtrl.remoteDebuggingPort,
-          }).shutdownBrowser();
-        } else {
-          await new PuppeteerMode({ browserController: browserCtrl, logger, reason: 'default runtime shutdown' }).shutdownBrowser();
-        }
-      } catch (error) {
-        logger.warn('Browser shutdown reported an error; continuing to exit.', {
-          error: error.message,
-        });
+        return new TextEncoder().encode(rawMessage).length;
+      } catch {
+        return rawMessage.length;
       }
-
-      const serverCloseGraceMs = 1500;
-      await Promise.race([
-        new Promise((resolve, reject) => {
-          server.close((error) => {
-            if (error) {
-              reject(error);
-              return;
-            }
-            resolve();
-          });
-
-          if (typeof server.closeIdleConnections === 'function') {
-            server.closeIdleConnections();
-          }
-        }),
-        new Promise((resolve) => {
-          setTimeout(() => {
-            if (typeof server.closeAllConnections === 'function') {
-              server.closeAllConnections();
-            }
-            logger.warn(`Server close grace period elapsed (${serverCloseGraceMs}ms). Forcing daemon exit.`);
-            resolve();
-          }, serverCloseGraceMs);
-        }),
-      ]).catch((error) => {
-        logger.warn('Server close reported an error during shutdown; continuing to exit.', {
-          error: error.message,
-        });
-      });
-    } finally {
-      // Guaranteed exit: runs even if the try body threw, so a rejected
-      // shutdown() can never leave the daemon alive on the retry (the
-      // shuttingDown guard would otherwise make the second call a no-op).
-      clearTimeout(forceExitTimer);
-      process.exit(code);
-    }
-  };
-  process.once('SIGINT', () => shutdown(null));
-  process.once('SIGTERM', () => shutdown(null));
-
-  logger.info(`Using external OWT signaling server: ${session.signalingServer}`);
-  logger.info(`Daemon static server running: http://${config.staticServerHost}:${config.staticServerPort}`);
-  logger.info(`Open daemon page: ${daemonUrl}`);
-  logger.info(`Daemon log level: ${config.daemonLogLevel}`);
-  logger.info('[MODE] Effective browser mode', {
-    env: {
-      BROWSER_HEADLESS: String(process.env.BROWSER_HEADLESS || ''),
-      DAEMON_CHROME_REMOTE_DEBUGGING_PORT: String(process.env.DAEMON_CHROME_REMOTE_DEBUGGING_PORT || ''),
-    },
-    config: {
-      browserHeadless: config.browserHeadless,
-      targetPageWidthMax: config.targetPageWidthMax,
-      targetPageHeightMax: config.targetPageHeightMax,
-    },
-    session: {
-      headless: session.headless,
-    },
-    browserController: {
-      headless: browserCtrl.headless,
-      mode: browserCtrl.mode,
-      connectionMode: browserCtrl.browserConnectionMode,
-    },
-  });
-
-  if (!toolModePayload) {
+    })();
+    let parsedType = '';
+    let parsedRequestId = '';
+    let parsedPayload = null;
     try {
-      await commands.handle({ type: 'launch_chrome' });
-      await commands.handle({ type: 'open_url', payload: { url: daemonUrl } });
-      logger.info('Opened daemon page on startup.');
-    } catch (error) {
-      logger.warn('Failed to auto-open daemon page on startup.', {
-        error: error?.message || String(error || ''),
-      });
+      const parsed = JSON.parse(rawMessage);
+      parsedPayload = parsed;
+      parsedType = String(parsed?.type || '').trim().toLowerCase();
+      parsedRequestId = String(parsed?.reqId || '');
+    } catch {
+      // Keep raw message logging even for non-JSON payloads.
     }
-  }
 
-  if (toolModePayload) {
-    logger.info('awe-daemon tool mode started', {
-      daemonId: toolModePayload.daemonId,
-      clientId: toolModePayload.clientId,
-      targetUrl: toolModePayload.targetUrl,
-      timeout: toolModePayload.timeout,
-      sessionId: toolModePayload.sessionId,
+    const originalId = String(event?.origin || '').trim();
+    // here, we reuse the same origin check logic as in the client SDK, 
+    // to ensure that the peer message is from the expected clientId (either in the origin or in the payload).
+    const payloadClientId = String(
+      parsedPayload?.payload?.clientId || parsedPayload?.clientId || originalId
+    ).trim();
+
+    logger.debug('daemon peer message received', {
+      origin: originalId,
+      type: parsedType,
+      reqId: parsedRequestId,
+      bytes: messageBytes,
+      payloadClientId: payloadClientId,
     });
 
-    try {
-      const startResult = await startSessionWorkflow({
-        ...toolModePayload,
-        daemonPage: 'daemon.html',
-      });
-      const toolModeRuntime = createToolModeRuntime({
-        browserController: browserCtrl,
-        logger,
-        requestedRemoteDebuggingPort: toolModePayload.remoteDebuggingPort,
-      });
-      logger.info('Tool-mode runtime selected', {
-        mode: toolModeRuntime.name,
-        requestedRemoteDebuggingPort: toolModePayload.remoteDebuggingPort,
-        browserConnectionMode: browserCtrl.browserConnectionMode,
-      });
+    const messageOrigin = String(event?.origin || '').trim();
+    const expectedClientId = String(session.clientId || '').trim();
+    const originMatchesSessionClient = normalizeId(messageOrigin) && normalizeId(expectedClientId) && normalizeId(messageOrigin) === normalizeId(expectedClientId);
+    const payloadMatchesSessionClient = normalizeId(payloadClientId) && normalizeId(expectedClientId) && normalizeId(payloadClientId) === normalizeId(expectedClientId);
 
-      const completion = await sessionManager.waitForSessionCompletion(Math.max(activeSession.timeoutMs + 60000, activeSession.timeoutMs));
-      const ok = completion.outcome === 'success';
-      const result = {
-        ok,
-        mode: toolModeRuntime.name,
-        stage: activeSession.stage,
-        status: activeSession.status,
-        message: completion.statusMessage || (ok ? 'Session completed successfully.' : 'Session completed with timeout.'),
-        snapshots: sessionManager.snapshots,
-        start: startResult,
-        completion,
-      };
-
-      emitToolResult(result, { compact: Boolean(toolModePayload.jsonCompact) });
-      await shutdown(ok ? 0 : 124, { toolModeRuntime });
-    } catch (error) {
-      sessionManager.updateProgress(activeSession.stage || SESSION_STAGES.START, 'error', error.message);
-      emitToolResult({
-        ok: false,
-        stage: activeSession.stage,
-        status: activeSession.status,
-        message: error.message,
-      }, { compact: Boolean(toolModePayload.jsonCompact), isError: true });
-      const toolModeRuntime = createToolModeRuntime({
-        browserController: browserCtrl,
-        logger,
-        requestedRemoteDebuggingPort: toolModePayload.remoteDebuggingPort,
+    if (originMatchesSessionClient || payloadMatchesSessionClient) {
+      if (!activeSession.connected) {
+        activeSession.connected = true;
+        activeSession.connectedAt = Date.now();
+      }
+      sessionManager.armClientMessageTimeout('peer_message', sessionManager.currentDaemonTimeoutMs);
+      logger.debug('Client message timeout reset from peer message.', {
+        origin: messageOrigin,
+        timeoutMs: sessionManager.currentDaemonTimeoutMs,
       });
-      await shutdown(1, { toolModeRuntime });
     }
+
+    if (parsedType === 'resolve') {
+      const expectedActiveClientId = normalizeId(activeSession.clientId);
+      const originMatchesActiveClient = normalizeId(messageOrigin) && expectedActiveClientId && normalizeId(messageOrigin) === expectedActiveClientId;
+      const payloadMatchesActiveClient = normalizeId(payloadClientId) && expectedActiveClientId && normalizeId(payloadClientId) === expectedActiveClientId;
+      if (originMatchesActiveClient || payloadMatchesActiveClient) {
+        // A resolve from the active client during a leave grace window means
+        // the client reconnected -- i.e. the previous `leave` was a page
+        // refresh, not a close. Cancel the deferred termination.
+        sessionManager.clearPendingLeave('reconnect_resolve');
+        if (!activeSession.connected) {
+          activeSession.connected = true;
+          activeSession.connectedAt = Date.now();
+        }
+        activeSession.resolved = true;
+        activeSession.lastResolveAt = Date.now();
+        activeSession.lastResolveFrom = messageOrigin || payloadClientId;
+        sessionManager.notifyReadyWaiters();
+        sessionManager.updateProgress(SESSION_STAGES.USER_INTERACTION, 'running', 'resolve received, user interaction phase');
+      }
+      logger.info('RESOLVE_RECEIVED', {
+        origin: String(event?.origin || ''),
+        payloadClientId,
+        reqId: parsedRequestId,
+        bytes: messageBytes,
+      });
+    } else if (parsedType === 'finish') {
+      const expectedActiveClientId = normalizeId(activeSession.clientId);
+      const earlyFinishForActiveSession = Boolean(activeSession.id && !activeSession.completedAt);
+      const acceptedFinish = await sessionManager.handleTerminationMessage({
+        expectedActiveClientId,
+        messageOrigin,
+        payloadClientId,
+        outcome: 'success',
+        statusMessage: 'Finish message received. Session completed successfully.',
+        snapshotPrefix: `finish-${activeSession.clientId || 'client'}`,
+        sendNotice: true,
+        updateSessionState: () => {
+          activeSession.lastFinishAt = Date.now();
+          activeSession.lastFinishFrom = messageOrigin || payloadClientId;
+        },
+      });
+
+      logger.info('FINISH_RECEIVED', {
+        origin: String(event?.origin || ''),
+        payloadClientId,
+        acceptedFinish,
+        earlyFinishForActiveSession,
+        reqId: parsedRequestId,
+        bytes: messageBytes,
+      });
+    } else if (parsedType === 'leave') {
+      const expectedActiveClientId = normalizeId(activeSession.clientId);
+      // Defer termination behind a grace window instead of ending the session
+      // immediately: a refresh emits the same `leave` as a close. If the client
+      // reconnects (resolve) within config.leaveGraceMs, the resolve handler
+      // cancels this; otherwise the timer fires and terminates as a real close.
+      const scheduledLeave = sessionManager.scheduleLeaveTermination({
+        expectedActiveClientId,
+        messageOrigin,
+        payloadClientId,
+        outcome: 'leave',
+        statusMessage: 'Leave message received from client. Session ended by client disconnect.',
+        snapshotPrefix: `leave-${activeSession.clientId || 'client'}`,
+        sendNotice: false,
+        updateSessionState: null,
+      });
+
+      logger.info('LEAVE_RECEIVED', {
+        origin: String(event?.origin || ''),
+        payloadClientId,
+        scheduledLeave,
+        graceMs: config.leaveGraceMs,
+        reqId: parsedRequestId,
+        bytes: messageBytes,
+      });
+    } else if (parsedType === 'timeout') {
+      const expectedActiveClientId = normalizeId(activeSession.clientId);
+      const acceptedTimeout = await sessionManager.handleTerminationMessage({
+        expectedActiveClientId,
+        messageOrigin,
+        payloadClientId,
+        outcome: 'timeout',
+        statusMessage: 'Timeout message received from client. Session ended by timeout event.',
+        snapshotPrefix: `timeout-${activeSession.clientId || 'client'}`,
+        sendNotice: true,
+        updateSessionState: null,
+      });
+
+      logger.info('TIMEOUT_RECEIVED', {
+        origin: String(event?.origin || ''),
+        payloadClientId,
+        acceptedTimeout,
+        reqId: parsedRequestId,
+        bytes: messageBytes,
+      });
+    } else if (parsedType === 'connect_only') {
+      logger.info('TAKE_ACTION_CONNECT_ONLY_RECEIVED', {
+        origin: String(event?.origin || ''),
+        reqId: parsedRequestId,
+        bytes: messageBytes,
+      });
+    }
+
+    daemonPageBridge.recordPeerMessage(event);
+    return;
   }
+  if (kind === 'peer_command_result') {
+    const resultType = String(event?.type || '').trim().toLowerCase();
+    logger.debug('daemon peer command result', {
+      reqId: String(event?.reqId || ''),
+      type: resultType,
+      ok: event?.ok !== false,
+      message: String(event?.message || ''),
+      error: String(event?.error || ''),
+      bridge: String(event?.bridge || ''),
+    });
+
+    if (resultType === 'resolve') {
+      if (event?.ok !== false) {
+        logger.info('RESOLVE_SHARE_STARTED', {
+          reqId: String(event?.reqId || ''),
+          message: String(event?.message || ''),
+        });
+      } else {
+        logger.error('RESOLVE_SHARE_FAILED', {
+          reqId: String(event?.reqId || ''),
+          error: String(event?.error || ''),
+        });
+      }
+    } else if (resultType === 'connect_only') {
+      if (event?.ok !== false) {
+        logger.info('TAKE_ACTION_SIGNALING_CONNECTED', {
+          reqId: String(event?.reqId || ''),
+          message: String(event?.message || ''),
+        });
+      } else {
+        logger.error('TAKE_ACTION_SIGNALING_CONNECT_FAILED', {
+          reqId: String(event?.reqId || ''),
+          error: String(event?.error || ''),
+        });
+      }
+    }
+
+    daemonPageBridge.recordPeerCommandResult(event);
+    return;
+  }
+  daemonPageBridge.markSeen();
+}
+
+const sessionRunParams = parseSessionRunOptions(process.argv.slice(2));
+if (!sessionRunParams || (sessionRunParams.sessionId === 'undefined' || sessionRunParams.sessionId === '')
+  || (sessionRunParams.targetUrl === 'undefined' || sessionRunParams.targetUrl === '')) {
+  logger.error('Invalid session run parameters. Required: --session-id <id> --target-url <url>');
+  process.exit(1);
+}
+
+const server = await startStaticServer({
+  rootDir: path.resolve(__dirname, '../public'),
+  browserModuleDir: path.resolve(__dirname, './daemon'),
+  clientSdkDir: path.resolve(__dirname, '../../client/src/sdk'),
+  host: config.staticServerHost,
+  port: config.staticServerPort,
+  getDaemonConfig: () => ({
+    ...session,
+    headless: config.browserHeadless,
+    runtimeMode: browserCtrl.getRuntimeMode(),
+    browserConnectionMode: browserCtrl.browserConnectionMode,
+    // Prefer the active session's timeout: it is assigned early in
+    // startSessionWorkflow (before the daemon page is opened and fetches
+    // this config), whereas currentDaemonTimeoutMs is only armed later.
+    // Reading currentDaemonTimeoutMs here would return the default
+    // (e.g. 120s) instead of the session's --timeout value (e.g. 300s).
+    daemonTimeoutMs: activeSession.timeoutMs || sessionManager.currentDaemonTimeoutMs,
+  }),
+  submitCommand: (command) => commands.handle(command),
+  getDaemonPageCommands: (after) => daemonPageBridge.getCommandsAfter(after),
+  onDaemonPageEvent: async (event) => {
+    await processDaemonPageEvent(event);
+  },
+  logger,
+});
+
+let shuttingDown = false;
+
+const shutdown = async (exitCode = null, options = {}) => {
+  if (shuttingDown) {
+    return;
+  }
+  const shutdownStrategy = options.shutdownStrategy || null;
+  const preserveBrowser = Object.prototype.hasOwnProperty.call(options, 'preserveBrowser')
+    ? Boolean(options.preserveBrowser)
+    : browserCtrl.shouldPreserveBrowserOnExit();
+  const code = Number.isInteger(exitCode) ? exitCode : (Number.isInteger(process.exitCode) ? process.exitCode : 0);
+  shuttingDown = true;
+
+  // Absolute failsafe: whatever throws or blocks below, guarantee the process
+  // terminates. unref() so this timer never itself keeps the event loop alive.
+  // Without this, a stalled browserCtrl.disconnect()/server.close() (or a throw
+  // before process.exit) leaves the HTTP server, Chrome CDP socket and timers
+  // holding the loop open -- the daemon hangs and never exits.
+  const forceExitTimer = setTimeout(() => {
+    logger.warn(`Shutdown failsafe elapsed; forcing immediate exit (code ${code}).`);
+    process.exit(code);
+  }, 5000);
+  if (typeof forceExitTimer.unref === 'function') {
+    forceExitTimer.unref();
+  }
+
+  try {
+    sessionManager.clearClientMessageTimeout();
+    sessionManager.clearPendingLeave('shutdown');
+
+    // Browser teardown is best-effort: a failure here must not prevent exit.
+    try {
+      if (shutdownStrategy) {
+        await shutdownStrategy.shutdownBrowser();
+      } else if (preserveBrowser) {
+        await new RemoteDevtoolsMode({
+          browserController: browserCtrl,
+          logger,
+          requestedRemoteDebuggingPort: browserCtrl.remoteDebuggingPort,
+        }).shutdownBrowser();
+      } else {
+        await new PuppeteerMode({ browserController: browserCtrl, logger, reason: 'default runtime shutdown' }).shutdownBrowser();
+      }
+    } catch (error) {
+      logger.warn('Browser shutdown reported an error; continuing to exit.', {
+        error: error.message,
+      });
+    }
+
+    const serverCloseGraceMs = 1500;
+    await Promise.race([
+      new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+
+        if (typeof server.closeIdleConnections === 'function') {
+          server.closeIdleConnections();
+        }
+      }),
+      new Promise((resolve) => {
+        setTimeout(() => {
+          if (typeof server.closeAllConnections === 'function') {
+            server.closeAllConnections();
+          }
+          logger.warn(`Server close grace period elapsed (${serverCloseGraceMs}ms). Forcing daemon exit.`);
+          resolve();
+        }, serverCloseGraceMs);
+      }),
+    ]).catch((error) => {
+      logger.warn('Server close reported an error during shutdown; continuing to exit.', {
+        error: error.message,
+      });
+    });
+  } finally {
+    // Guaranteed exit: runs even if the try body threw, so a rejected
+    // shutdown() can never leave the daemon alive on the retry (the
+    // shuttingDown guard would otherwise make the second call a no-op).
+    clearTimeout(forceExitTimer);
+    process.exit(code);
+  }
+};
+
+process.once('SIGINT', () => shutdown(null));
+process.once('SIGTERM', () => shutdown(null));
+
+logger.info(`DUC runtime started!`);
+logger.info(`Using external OWT signaling server: ${session.signalingServer}`);
+logger.info(`Daemon static server running: http://${config.staticServerHost}:${config.staticServerPort}`);
+logger.info(`Daemon log level: ${config.daemonLogLevel}`);
+logger.info('[MODE] Effective browser mode', {
+  env: {
+    BROWSER_HEADLESS: String(process.env.BROWSER_HEADLESS || ''),
+    DAEMON_CHROME_REMOTE_DEBUGGING_PORT: String(process.env.DAEMON_CHROME_REMOTE_DEBUGGING_PORT || ''),
+  },
+  config: {
+    browserHeadless: config.browserHeadless,
+    targetPageWidthMax: config.targetPageWidthMax,
+    targetPageHeightMax: config.targetPageHeightMax,
+  },
+  session: {
+    headless: session.headless,
+  },
+  browserController: {
+    headless: browserCtrl.headless,
+    mode: browserCtrl.mode,
+    connectionMode: browserCtrl.browserConnectionMode,
+  },
+});
+
+
+logger.info('Start duc daemon session', {
+  daemonId: sessionRunParams.daemonId,
+  clientId: sessionRunParams.clientId,
+  targetUrl: sessionRunParams.targetUrl,
+  timeout: sessionRunParams.timeout,
+  sessionId: sessionRunParams.sessionId,
+});
+
+try {
+  const startResult = await startSessionWorkflow({
+    ...sessionRunParams,
+    daemonPage: 'daemon.html',
+  });
+  const shutdownStrategy = resolveBrowserShutdownStrategy({
+    browserController: browserCtrl,
+    logger,
+    requestedRemoteDebuggingPort: sessionRunParams.remoteDebuggingPort,
+  });
+  logger.info('duc strategy selected', {
+    mode: shutdownStrategy.name,
+    requestedRemoteDebuggingPort: sessionRunParams.remoteDebuggingPort,
+    browserConnectionMode: browserCtrl.browserConnectionMode,
+  });
+
+  const completion = await sessionManager.waitForSessionCompletion(Math.max(activeSession.timeoutMs + 60000, activeSession.timeoutMs));
+  const ok = completion.outcome === 'success';
+  const result = {
+    ok,
+    mode: shutdownStrategy.name,
+    stage: activeSession.stage,
+    status: activeSession.status,
+    message: completion.statusMessage || (ok ? 'Session completed successfully.' : 'Session completed with timeout.'),
+    snapshots: sessionManager.snapshots,
+    start: startResult,
+    completion,
+  };
+
+  emitToolResult(result, { compact: Boolean(sessionRunParams.jsonCompact) });
+  await shutdown(ok ? 0 : 124, { shutdownStrategy });
+} catch (error) {
+  sessionManager.updateProgress(activeSession.stage || SESSION_STAGES.START, 'error', error.message);
+  emitToolResult({
+    ok: false,
+    stage: activeSession.stage,
+    status: activeSession.status,
+    message: error.message,
+  }, { compact: Boolean(sessionRunParams.jsonCompact), isError: true });
+  const shutdownStrategy = resolveBrowserShutdownStrategy({
+    browserController: browserCtrl,
+    logger,
+    requestedRemoteDebuggingPort: sessionRunParams.remoteDebuggingPort,
+  });
+  await shutdown(1, { shutdownStrategy });
 }
