@@ -132,6 +132,7 @@ export class BrowserController {
     }
     if (targetCandidate) {
       this.targetPage = targetCandidate;
+      await this.installAutoShareTitleEnforcer(targetCandidate);
     }
   }
 
@@ -166,12 +167,58 @@ export class BrowserController {
     if (!this.targetPage || (typeof this.targetPage.isClosed === 'function' && this.targetPage.isClosed())) {
       this.targetPage = await this.browser.newPage();
       await this.targetPage.setUserAgent('agentic-browser-target');
+      await this.installAutoShareTitleEnforcer(this.targetPage);
       // No initial viewport set here: every caller that creates a brand-new target page
       // goes through openTarget(), which immediately calls optimizeViewportForPageSize()
       // afterward and unconditionally applies the correct baseline/optimal viewport via
       // CDP + setViewport. Setting a viewport here would just be overwritten right away.
     }
     return this.targetPage;
+  }
+
+  // Pin the auto-share source title on every document the target page loads. The
+  // capture flag (--auto-select-tab-capture-source-by-title) selects the tab by
+  // title, but document.title is per-document: a redirect chain (A -> B -> A) or
+  // the page's own scripts would otherwise strip the title we set once. This init
+  // script re-fires at document-start of every navigation and a MutationObserver
+  // re-asserts it if the page changes it, so the title stays pinned through to
+  // capture time.
+  async installAutoShareTitleEnforcer(page) {
+    if (!AUTO_SHARE_SOURCE_TITLE) {
+      return;
+    }
+    try {
+      await page.evaluateOnNewDocument((title) => {
+        const enforce = () => {
+          if (document.title !== title) {
+            document.title = title;
+          }
+        };
+        const install = () => {
+          const root = document.head || document.documentElement;
+          if (!root) {
+            return;
+          }
+          new MutationObserver(enforce).observe(root, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+          });
+        };
+        enforce();
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', () => {
+            enforce();
+            install();
+          });
+        } else {
+          install();
+        }
+        window.addEventListener('load', enforce);
+      }, AUTO_SHARE_SOURCE_TITLE);
+    } catch (error) {
+      logger.warn(`install auto-share title enforcer failed: ${error.message}`);
+    }
   }
 
   getActiveControlPage() {
