@@ -189,10 +189,10 @@ export class DirectUserControlClient {
     }
   }
 
-  setDaemonId(remoteId) {
-    const nextDaemonId = String(remoteId || '').trim();
-    this.remoteId = nextDaemonId;
-    this.transport.setAllowedRemoteIds(nextDaemonId ? [nextDaemonId] : []);
+  setRemoteId(remoteId) {
+    const nextRemoteId = String(remoteId || '').trim();
+    this.remoteId = nextRemoteId;
+    this.transport.setAllowedRemoteIds(nextRemoteId ? [nextRemoteId] : []);
   }
 
   async disconnect() {
