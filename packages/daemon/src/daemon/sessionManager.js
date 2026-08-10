@@ -1,5 +1,10 @@
 import { normalizeId } from './sessionOptions.js';
 
+// Hard cap for a termination (finish/leave/timeout) snapshot capture. The
+// capture is viewport-only and raced against this value; if it does not finish
+// in time the snapshot is skipped (logged) so it can never delay session
+// completion. Deliberately independent of the session/protocol timeouts.
+const TERMINATION_SNAPSHOT_TIMEOUT_MS = 10_000;
 // Ordered stages a session moves through, surfaced in status payloads/logs.
 export const SESSION_STAGES = {
   START: 'start',
@@ -156,6 +161,47 @@ export class SessionManager {
     return Boolean(originMatchesActiveClient || payloadMatchesActiveClient || (this.activeSession.id && !this.activeSession.completedAt));
   }
 
+  // Bounded, non-blocking termination snapshot. Viewport-only (fullPage:false)
+  // and raced against TERMINATION_SNAPSHOT_TIMEOUT_MS: a slow or hung page
+  // (e.g. Page.captureScreenshot timing out at puppeteer's 180s protocolTimeout)
+  // must NOT delay session completion -- on timeout or error we log and
+  // proceed. The capture must finish (or be abandoned) before completeSession(),
+  // because completion teardown closes the CDP connection, so a snapshot cannot
+  // be deferred to run after exit.
+  async captureTerminationSnapshot({ outcome, prefix, timeoutMs = TERMINATION_SNAPSHOT_TIMEOUT_MS }) {
+    const started = Date.now();
+    let timeoutHandle;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutHandle = setTimeout(
+        () => reject(new Error(`snapshot capture timed out after ${timeoutMs}ms (viewport-only)`)),
+        timeoutMs,
+      );
+    });
+    try {
+      const snapshot = await Promise.race([
+        this.browserCtrl.saveTargetSnapshotToFile({
+          fullPage: false,
+          outputDir: this.config.timeoutSnapshotDir,
+          fileNamePrefix: prefix,
+        }),
+        timeoutPromise,
+      ]);
+      this.rememberTimeoutSnapshot(snapshot, outcome);
+      this.logger.info(`Captured ${outcome} viewport snapshot.`, {
+        outputPath: snapshot.outputPath,
+        tookMs: Date.now() - started,
+      });
+      return snapshot;
+    } catch (error) {
+      this.logger.warn(`Skipping ${outcome} snapshot (non-blocking).`, {
+        error: error.message,
+        tookMs: Date.now() - started,
+      });
+      return null;
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
+  }
   async handleTerminationMessage(options = {}) {
     const {
       outcome,
@@ -174,19 +220,9 @@ export class SessionManager {
       updateSessionState();
     }
 
-    // Capture snapshot
-    try {
-      const snapshot = await this.browserCtrl.saveTargetSnapshotToFile({
-        fullPage: true,
-        outputDir: this.config.timeoutSnapshotDir,
-        fileNamePrefix: snapshotPrefix,
-      });
-      this.rememberTimeoutSnapshot(snapshot, outcome);
-    } catch (error) {
-      this.logger.warn(`Failed to capture ${outcome} snapshot.`, {
-        error: error.message,
-      });
-    }
+    // Capture a bounded viewport-only snapshot (never blocks completion;
+    // failures are logged and skipped). See captureTerminationSnapshot().
+    await this.captureTerminationSnapshot({ outcome, prefix: snapshotPrefix });
 
     // Close only the daemon.html control page as part of termination cleanup
     // (client finish/leave or timeout). This must run BEFORE completeSession(),
@@ -454,29 +490,17 @@ export class SessionManager {
       this.clientMessageTimeoutHandle = null;
 
       const fallbackClientId = this.getFallbackClientId();
-      this.logger.warn('Client message timeout reached. Capturing full-page snapshot.', {
+      this.logger.warn('Client message timeout reached. Capturing viewport snapshot.', {
         timeoutMs,
         reason,
         clientId: fallbackClientId,
         outputDir: this.config.timeoutSnapshotDir,
       });
 
-      try {
-        const snapshot = await this.browserCtrl.saveTargetSnapshotToFile({
-          fullPage: true,
-          outputDir: this.config.timeoutSnapshotDir,
-          fileNamePrefix: `timeout-${fallbackClientId || 'client'}`,
-        });
-        this.rememberTimeoutSnapshot(snapshot, 'timeout');
-        this.logger.info('Timeout snapshot saved.', {
-          outputPath: snapshot.outputPath,
-          targetUrl: snapshot?.targetPage?.url || '',
-        });
-      } catch (error) {
-        this.logger.error('Timeout snapshot failed.', {
-          error: error.message,
-        });
-      }
+      await this.captureTerminationSnapshot({
+        outcome: 'timeout',
+        prefix: `timeout-${fallbackClientId || 'client'}`,
+      });
 
       if (this.activeSession.id) {
         this.completeSession('timeout', `Session timed out after ${Math.max(1, Math.floor(timeoutMs / 1000))} seconds.`);
