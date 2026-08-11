@@ -240,10 +240,10 @@ sequenceDiagram
 
     alt Client page refreshes, closes, or navigates away
         Client->>DaemonPage: Send Leave (best-effort, 500ms window)
-        DaemonPage->>DaemonPage: Keep signaling alive; drop stale share; arm refresh reconnect
+        DaemonPage->>DaemonPage: Keep signaling alive#59; drop stale share#59; arm refresh reconnect
         Daemon->>Daemon: Defer termination behind leave grace window (config.leaveGraceMs)
         alt Client reconnects within grace window (was a refresh)
-            Client->>DaemonPage: Send Resolve; daemon rebuilds share + data channel
+            Client->>DaemonPage: Send Resolve#59; daemon rebuilds share + data channel
             Daemon->>Daemon: Cancel pending leave termination
         else Grace window elapses (was a genuine close)
             Daemon->>Daemon: Capture leave snapshot
