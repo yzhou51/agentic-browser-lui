@@ -20,7 +20,7 @@ Node.js pnpm workspace for a direct user control P2P system with two sub-project
 ## Upstream References
 
 - OWT signaling sample server: [open-webrtc-toolkit/owt-server-p2p](https://github.com/open-webrtc-toolkit/owt-server-p2p)
-- OWT JavaScript SDK: [open-webrtc-toolkit/owt-client-javascript](https://github.com/open-webrtc-toolkit/owt-client-javascript)
+- OWT JavaScript SDK: [open-webrtc-toolkit/owt-client-javascript](https://github.com/open-webrtc-toolkit/owt-client-javascript) (vendored as `public/vendor/owt.js` in the client and daemon packages and loaded as a browser global — not an npm dependency)
 
 ## Setup
 
