@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,6 +16,43 @@ dotenv.config({ path: path.resolve(rootDir, '.env') });
 const staticHost = process.env.CLIENT_STATIC_HOST || '0.0.0.0';
 const staticPort = Number(process.env.CLIENT_STATIC_PORT || 5174);
 const publicHost = staticHost === '0.0.0.0' ? os.hostname() : staticHost;
+
+// Enable HTTPS by setting CLIENT_STATIC_HTTPS=true and pointing
+// CLIENT_STATIC_TLS_CERT / CLIENT_STATIC_TLS_KEY at PEM files. When disabled (the
+// default) the server falls back to plain HTTP.
+const useHttps = String(process.env.CLIENT_STATIC_HTTPS || 'false').toLowerCase() === 'true';
+
+function loadTlsOptions() {
+  const certPath = process.env.CLIENT_STATIC_TLS_CERT;
+  const keyPath = process.env.CLIENT_STATIC_TLS_KEY;
+  if (!certPath || !keyPath) {
+    console.error(
+      'CLIENT_STATIC_HTTPS is enabled but CLIENT_STATIC_TLS_CERT and/or CLIENT_STATIC_TLS_KEY are not set.'
+    );
+    process.exit(1);
+  }
+  try {
+    const options = {
+      cert: fs.readFileSync(path.resolve(rootDir, certPath)),
+      key: fs.readFileSync(path.resolve(rootDir, keyPath)),
+    };
+    const caPath = process.env.CLIENT_STATIC_TLS_CA;
+    if (caPath) {
+      options.ca = fs.readFileSync(path.resolve(rootDir, caPath));
+    }
+    const passphrase = process.env.CLIENT_STATIC_TLS_PASSPHRASE;
+    if (passphrase) {
+      options.passphrase = passphrase;
+    }
+    return options;
+  } catch (error) {
+    console.error('Failed to read TLS certificate/key for the client static server.', error);
+    process.exit(1);
+  }
+  return undefined;
+}
+
+const protocol = useHttps ? 'https' : 'http';
 
 // Generate the config the client fetches at /client.runtime.json. This uses the
 // same generator the Vite dev/preview server uses (src/config.js), so
@@ -52,7 +90,7 @@ function resolveSafePath(reqPath) {
   return candidate;
 }
 
-const server = http.createServer((req, res) => {
+function handleRequest(req, res) {
   if (!req.url) {
     res.writeHead(400);
     res.end('Bad Request');
@@ -86,7 +124,11 @@ const server = http.createServer((req, res) => {
     });
     stream.pipe(res);
   });
-});
+}
+
+const server = useHttps
+  ? https.createServer(loadTlsOptions(), handleRequest)
+  : http.createServer(handleRequest);
 
 server.on('error', (error) => {
   if (error && error.code === 'EADDRINUSE') {
@@ -103,8 +145,8 @@ server.on('error', (error) => {
 });
 
 server.listen(staticPort, staticHost, () => {
-  console.log(`Client static server running: http://${staticHost}:${staticPort}`);
-  console.log(`Open demo page: http://${publicHost}:${staticPort}/direct-user-control.html`);
+  console.log(`Client static server running: ${protocol}://${staticHost}:${staticPort}`);
+  console.log(`Open demo page: ${protocol}://${publicHost}:${staticPort}/direct-user-control.html`);
 });
 
 let shuttingDown = false;
